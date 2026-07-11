@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 4 · Dockerfiles — Docker Notes</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> docker-notes</div>
+  <div class="links">
+    <a href="index.html">chapters</a>
+    <a href="cheatsheet.html">cheat sheet</a>
+    <a href="https://github.com/" target="_blank" rel="noopener">github ↗</a>
+  </div>
+</nav>
+
+<div class="shell">
+
+  <div class="chapter-header" style="padding-top:48px;">
+    <div class="chapter-meta">chapter 04 / 07</div>
+    <h1>Dockerfiles: Building Your Own Images</h1>
+  </div>
+
+  <div class="prose">
+
+    <p>
+      A Dockerfile is a recipe — a plain text file that tells Docker how to build an
+      image, layer by layer, top to bottom.
+    </p>
+
+    <h2>Core instructions</h2>
+    <table>
+      <tr><th>Instruction</th><th>Runs</th><th>Purpose</th></tr>
+      <tr><td><code>FROM</code></td><td>build</td><td>Base image — always first line</td></tr>
+      <tr><td><code>WORKDIR</code></td><td>build</td><td>Sets working directory for everything after</td></tr>
+      <tr><td><code>COPY</code></td><td>build</td><td>Copies files from build context into the image</td></tr>
+      <tr><td><code>RUN</code></td><td>build</td><td>Executes a command, result baked into a layer permanently</td></tr>
+      <tr><td><code>ENV</code></td><td>build + runtime</td><td>Sets a default env var, overridable at <code>docker run</code></td></tr>
+      <tr><td><code>ARG</code></td><td>build only</td><td>Build-time-only variable</td></tr>
+      <tr><td><code>EXPOSE</code></td><td>documentation</td><td>Documents the port — doesn't actually publish it</td></tr>
+      <tr><td><code>USER</code></td><td>build + runtime</td><td>Switches to a non-root user</td></tr>
+      <tr><td><code>CMD</code></td><td>runtime</td><td>Default command — fully overridable at <code>docker run</code></td></tr>
+    </table>
+
+    <h2>RUN vs. CMD</h2>
+    <p>
+      <strong>RUN</strong> executes during <code>docker build</code> and is permanently
+      baked into the image. <strong>CMD</strong> executes every time a container
+      <em>starts</em> — it's not baked in, just metadata about what to run.
+    </p>
+
+    <h2>ENTRYPOINT vs. CMD</h2>
+    <pre><code># CMD only — fully replaceable
+CMD ["python", "app.py"]
+docker run myapp bash        # runs: bash (CMD overridden)
+
+# ENTRYPOINT only — runtime args are APPENDED, not replaced
+ENTRYPOINT ["python", "app.py"]
+docker run myapp --debug     # runs: python app.py --debug
+
+# Both together — most flexible pattern
+ENTRYPOINT ["python"]
+CMD ["app.py"]
+docker run myapp other.py    # runs: python other.py</code></pre>
+    <p>Mental model: <strong>ENTRYPOINT = the verb, CMD = the default noun</strong> (changeable).</p>
+
+    <h2>Layer caching — order matters</h2>
+    <p>
+      Docker caches each layer. If a layer's input hasn't changed, the cached version
+      is reused instead of rebuilt. Put things that change rarely at the top of the
+      Dockerfile, and things that change constantly (your code) at the bottom.
+    </p>
+    <pre><code>COPY requirements.txt .              # changes rarely
+RUN pip install -r requirements.txt  # cached unless requirements.txt changes
+COPY . .                             # changes constantly — put last</code></pre>
+    <div class="callout bug">
+      <span class="callout-label">common mistake</span>
+      <code>COPY . .</code> before <code>RUN pip install</code> means every single
+      code change invalidates the pip install layer too — wasting 30+ seconds on
+      every rebuild for no reason.
+    </div>
+
+    <h2>0.0.0.0 vs. 127.0.0.1</h2>
+    <p>
+      Flask defaults to <code>127.0.0.1</code> — accessible only from inside the
+      container. Use <code>host='0.0.0.0'</code> to accept connections from outside
+      the container (i.e. through the <code>-p</code> port mapping).
+    </p>
+
+    <h2>ENV as runtime configuration</h2>
+    <p>
+      <code>ENV</code> in a Dockerfile sets a <strong>default</strong>, not a locked
+      value — <code>-e</code> at <code>docker run</code> always overrides it.
+    </p>
+    <pre><code>docker run -e APP_ENV=staging myapp</code></pre>
+    <p>
+      This is the whole point: <strong>build once, configure at runtime.</strong> One
+      image, deployed identically everywhere, only its environment variables differ
+      between staging/testing/production. No rebuild-per-environment risk.
+    </p>
+
+    <h2>Non-root users — and the ownership trap</h2>
+    <pre><code>COPY . .
+RUN useradd --create-home appuser &amp;&amp; \
+    chown -R appuser:appuser /app
+USER appuser</code></pre>
+    <div class="callout bug">
+      <span class="callout-label">real bug hit</span>
+      <code>COPY</code> runs as root by default (before <code>USER</code> is set),
+      so copied files are owned by <code>root</code>. Switching to a non-root user
+      afterward without <code>chown -R</code> means that user can't write to its own
+      app directory — fine for simple read-only demos, but breaks the moment the app
+      needs to write logs or handle uploads.
+    </div>
+
+    <h2>.dockerignore</h2>
+    <pre><code>.git/
+__pycache__/
+*.pyc
+.env
+.dockerignore
+Dockerfile
+.idea/</code></pre>
+    <p>Keeps the build context small and prevents IDE folders / secrets from landing inside the image.</p>
+
+  </div>
+
+  <div class="chapter-nav">
+    <a href="chapter3.html">
+      <span class="dir">← previous</span>
+      <span>03 · Images: The Blueprint</span>
+    </a>
+    <a href="chapter5.html" class="next">
+      <span class="dir">next →</span>
+      <span>05 · Volumes &amp; Persistent Storage</span>
+    </a>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  built while learning docker · served by nginx:alpine
+</footer>
+
+</body>
+</html>

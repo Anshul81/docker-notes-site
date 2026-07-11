@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 7 · Docker Compose — Docker Notes</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> docker-notes</div>
+  <div class="links">
+    <a href="index.html">chapters</a>
+    <a href="cheatsheet.html">cheat sheet</a>
+    <a href="https://github.com/" target="_blank" rel="noopener">github ↗</a>
+  </div>
+</nav>
+
+<div class="shell">
+
+  <div class="chapter-header" style="padding-top:48px;">
+    <div class="chapter-meta">chapter 07 / 07</div>
+    <h1>Docker Compose</h1>
+  </div>
+
+  <div class="prose">
+
+    <h2>Why Compose exists</h2>
+    <p>
+      Running a multi-container stack manually means several <code>docker run</code>
+      commands, each with multiple flags, executed in a specific order. Compose
+      describes the entire stack — services, networks, volumes — in one YAML file,
+      brought up with a single command.
+    </p>
+
+    <h2>The full stack</h2>
+    <pre><code>services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: mysecretpassword
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  flask-app:
+    build: .
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      REDIS_HOST: redis
+
+volumes:
+  pgdata:</code></pre>
+
+    <h2>Service name = hostname</h2>
+    <p>
+      Compose automatically creates one network for the whole project and attaches
+      every service to it. DNS resolution uses the <strong>service name</strong> (the
+      YAML key, e.g. <code>postgres</code>) — not <code>container_name</code>, which
+      is purely cosmetic and has no effect on networking.
+    </p>
+
+    <h2>depends_on ≠ ready</h2>
+    <div class="callout bug">
+      <span class="callout-label">real gap</span>
+      <code>depends_on</code> alone only guarantees <em>start order</em>, not that the
+      dependency has finished initializing. A container can "start" before its
+      internal service (e.g. Postgres) is actually accepting connections — a race
+      condition. Fixed with <code>healthcheck</code> +
+      <code>depends_on: condition: service_healthy</code>, which waits for an actual
+      readiness check to pass, not just for the process to launch.
+    </div>
+
+    <h2>Automatic DB init</h2>
+    <p>
+      The official <code>postgres</code> image auto-runs any <code>.sql</code> file
+      placed in <code>/docker-entrypoint-initdb.d/</code> — but <strong>only on a
+      genuinely empty data directory</strong>, on first startup. Bind-mounting
+      <code>init.sql</code> there means the schema is ready before the app ever makes
+      its first request — no manual <code>psql</code> steps needed.
+    </p>
+    <div class="callout bug">
+      <span class="callout-label">catch</span>
+      If the volume already contains <em>any</em> Postgres data (even from a failed
+      earlier attempt), init is skipped entirely. Force a clean re-init with
+      <code>docker compose down -v</code> before <code>up</code>.
+    </div>
+
+    <h2>--build vs. plain up</h2>
+    <p>
+      <code>docker compose up</code> only builds automatically the very first time.
+      After that, it reuses whatever image is cached — code changes to
+      <code>app.py</code> silently won't apply unless you explicitly rebuild:
+    </p>
+    <pre><code>docker compose up --build</code></pre>
+    <p>
+      Note this is a completely separate concern from volume data — changing
+      <code>init.sql</code> needs <code>down -v</code> + <code>up</code>, not
+      <code>--build</code>, since init scripts aren't part of the image at all.
+    </p>
+
+    <h2>down vs. down -v</h2>
+    <table>
+      <tr><th>Command</th><th>Containers</th><th>Network</th><th>Volumes</th></tr>
+      <tr><td><code>docker compose down</code></td><td>removed</td><td>removed</td><td>kept</td></tr>
+      <tr><td><code>docker compose down -v</code></td><td>removed</td><td>removed</td><td>deleted</td></tr>
+    </table>
+
+    <h2>Redis caching pattern</h2>
+    <pre><code>cached = redis_client.get('students_cache')
+if cached:
+    return {"students": json.loads(cached), "source": "cache"}
+
+# ...query Postgres...
+
+redis_client.setex('students_cache', 30, json.dumps(students))
+return {"students": students, "source": "database"}</code></pre>
+    <p>
+      Check the cache first. On a miss, query Postgres and store the result with a
+      30-second expiry (<code>setex</code>). Verified the full lifecycle directly:
+      first request → <code>database</code>, next several within 30s →
+      <code>cache</code>, request after expiry → <code>database</code> again.
+    </p>
+
+    <h2>Project-scoped naming</h2>
+    <p>
+      Compose prefixes volumes and networks with the project folder name
+      (<code>chapter7_pgdata</code>, <code>chapter7_default</code>) automatically —
+      preventing two unrelated projects that both use a volume called
+      <code>pgdata</code> from accidentally colliding or corrupting each other's data.
+    </p>
+
+    <h2>Compose command reference</h2>
+    <pre><code>docker compose up              # start (foreground)
+docker compose up -d           # start (detached)
+docker compose up --build      # rebuild images first
+docker compose ps              # project-scoped container list
+docker compose logs -f &lt;svc&gt;   # follow logs for one service
+docker compose down            # stop + remove containers/network, KEEP volumes
+docker compose down -v         # also DELETE volumes
+docker compose restart &lt;svc&gt;   # restart one service</code></pre>
+
+  </div>
+
+  <div class="chapter-nav">
+    <a href="chapter6.html">
+      <span class="dir">← previous</span>
+      <span>06 · Networking</span>
+    </a>
+    <a href="cheatsheet.html" class="next">
+      <span class="dir">next →</span>
+      <span>Command Cheat Sheet</span>
+    </a>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  built while learning docker · served by nginx:alpine
+</footer>
+
+</body>
+</html>

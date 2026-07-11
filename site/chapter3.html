@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 3 · Images: The Blueprint — Docker Notes</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> docker-notes</div>
+  <div class="links">
+    <a href="index.html">chapters</a>
+    <a href="cheatsheet.html">cheat sheet</a>
+    <a href="https://github.com/" target="_blank" rel="noopener">github ↗</a>
+  </div>
+</nav>
+
+<div class="shell">
+
+  <div class="chapter-header" style="padding-top:48px;">
+    <div class="chapter-meta">chapter 03 / 07</div>
+    <h1>Images: The Blueprint</h1>
+  </div>
+
+  <div class="prose">
+
+    <h2>An image is a stack of layers</h2>
+    <p>
+      Not a single file — a stack of read-only, immutable layers. Each represents a
+      set of filesystem changes. When a container runs, Docker adds one thin
+      <strong>writable layer</strong> on top, unique to that container.
+    </p>
+
+    <h3>Union filesystem</h3>
+    <p>
+      Merges every layer into one unified view. Like stacked transparent glass sheets —
+      each sheet independent, but together they form one complete picture.
+    </p>
+
+    <h3>Copy-on-write (CoW)</h3>
+    <p>
+      When a container modifies a file that lives in a read-only image layer, Docker
+      copies that file <em>up</em> to the container's writable layer first, then
+      modifies the copy. The original in the image is never touched — which is why
+      five containers from the same image never interfere with each other.
+    </p>
+
+    <div class="callout">
+      <span class="callout-label">verified live</span>
+      Wrote a file inside one container's <code>/tmp</code>. A second container from
+      the same image couldn't see it — proof the file only existed in the first
+      container's own writable layer, not in the shared image.
+    </div>
+
+    <h2>Why layers matter: caching</h2>
+    <p>
+      Two images that both start from Ubuntu and install the same libraries don't
+      store that data twice — Docker recognizes identical layers and stores them once,
+      shared across images. This is also why pulling a second Python image is faster
+      than the first: many base layers are already local.
+    </p>
+
+    <h2>Tags are pointers, not copies</h2>
+    <pre><code>docker tag hello-world:latest anshul/my-first-image:v1.0
+docker images   # same Image ID, two different tag entries</code></pre>
+    <p>
+      Tagging never duplicates data — it just creates a new label pointing at the
+      same underlying image ID.
+    </p>
+
+    <div class="callout bug">
+      <span class="callout-label">production rule</span>
+      Never use <code>:latest</code> in production. It's not "auto-updating" — it's
+      just "whatever was tagged latest at pull time," which breaks reproducibility.
+      Pin exact versions: <code>python:3.11.4-slim</code>, not <code>python:latest</code>.
+    </div>
+
+    <h2>Base image sizes — measured, not assumed</h2>
+    <table>
+      <tr><th>Image</th><th>Size</th></tr>
+      <tr><td><code>python:3.11</code></td><td>1.6 GB</td></tr>
+      <tr><td><code>python:3.11-slim</code></td><td>188 MB</td></tr>
+      <tr><td><code>python:3.11-alpine</code></td><td>84 MB</td></tr>
+    </table>
+    <p>
+      Alpine is smallest but uses <code>musl libc</code> instead of <code>glibc</code>,
+      which can break Python packages with C extensions. <code>slim</code> is usually
+      the safer default for Python apps — most of the size win, none of the
+      compatibility risk.
+    </p>
+
+    <h2>Useful commands</h2>
+    <pre><code>docker history nginx:latest       # see every layer + size
+docker inspect nginx:latest       # full JSON detail
+docker system df                  # disk usage summary
+docker system prune -a            # remove ALL unused images/containers</code></pre>
+
+  </div>
+
+  <div class="chapter-nav">
+    <a href="chapter2.html">
+      <span class="dir">← previous</span>
+      <span>02 · Architecture &amp; Core Concepts</span>
+    </a>
+    <a href="chapter4.html" class="next">
+      <span class="dir">next →</span>
+      <span>04 · Dockerfiles</span>
+    </a>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  built while learning docker · served by nginx:alpine
+</footer>
+
+</body>
+</html>

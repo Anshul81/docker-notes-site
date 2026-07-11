@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 2 · Architecture &amp; Core Concepts — Docker Notes</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> docker-notes</div>
+  <div class="links">
+    <a href="index.html">chapters</a>
+    <a href="cheatsheet.html">cheat sheet</a>
+    <a href="https://github.com/" target="_blank" rel="noopener">github ↗</a>
+  </div>
+</nav>
+
+<div class="shell">
+
+  <div class="chapter-header" style="padding-top:48px;">
+    <div class="chapter-meta">chapter 02 / 07</div>
+    <h1>Docker Architecture &amp; Core Concepts</h1>
+  </div>
+
+  <div class="prose">
+
+    <h2>Three components</h2>
+    <p>
+      Typing <code>docker run nginx</code> involves three separate pieces talking to each other:
+    </p>
+    <ul>
+      <li><strong>CLI</strong> — the waiter. Translates your command into an API call. Does zero actual work.</li>
+      <li><strong>Daemon (dockerd)</strong> — the kitchen. Always running in the background, does the actual work: builds images, runs containers, manages volumes/networks.</li>
+      <li><strong>Registry (Docker Hub)</strong> — the supermarket. Where images are stored remotely.</li>
+    </ul>
+
+    <h3>Tracing <code>docker run -d -p 8080:80 nginx</code></h3>
+    <pre><code>CLI parses command → sends REST API request to Daemon
+Daemon checks: image local? → NO → pulls from Docker Hub
+Image cached locally
+Daemon creates container: ID, name, network, filesystem, port mapping
+Daemon starts the container process
+CLI prints container ID, returns control (because of -d)</code></pre>
+
+    <p>
+      Second run of the same image skips the pull entirely — the local image cache
+      means <code>docker run</code> goes straight from "check locally" to "create and start."
+    </p>
+
+    <h2>Container lifecycle</h2>
+    <pre><code>docker create → CREATED
+docker start  → RUNNING
+docker stop   → STOPPED (exited)
+docker start  → RUNNING again (reusable!)
+docker rm     → DELETED (permanent)</code></pre>
+
+    <div class="callout">
+      <span class="callout-label">important distinction</span>
+      <strong>Stopped ≠ Deleted.</strong> A stopped container is a switched-off laptop —
+      <code>docker start</code> brings it back exactly as it was. A removed container
+      is gone permanently; you have to <code>docker run</code> a fresh one.
+    </div>
+
+    <h2>How isolation actually works</h2>
+    <p>
+      Two Linux kernel features make containers possible:
+    </p>
+    <p>
+      <strong>Namespaces</strong> — give a process its own private view of a system
+      resource: PID (process list), NET (network interface), MNT (filesystem), UTS
+      (hostname), IPC, USER. Like every hotel floor having its own "Room 101" —
+      no actual conflict, no visibility into each other.
+    </p>
+    <p>
+      <strong>Cgroups</strong> — limit how much CPU/RAM/disk a container can actually
+      use, enforced by the kernel. Without limits, one runaway container can starve
+      everything else on the host.
+    </p>
+    <pre><code>docker run -d --memory="512m" --cpus="0.5" nginx</code></pre>
+
+    <div class="callout">
+      <span class="callout-label">mental model</span>
+      A container = a process + namespaces (isolated view) + cgroups (limited resources)
+      + a filesystem from the image. No mini-OS, no magic — just a walled, capped process.
+      That's why containers start in milliseconds.
+    </div>
+
+    <h2>docker exec — entering a running container</h2>
+    <pre><code>docker exec -it my-nginx bash</code></pre>
+    <p>
+      <code>-i</code> keeps stdin open, <code>-t</code> allocates a terminal. Use
+      <code>-it</code> when you want to interact live (debugging, exploring). Use
+      <code>-d</code> for background services that should just keep running.
+    </p>
+
+    <div class="callout bug">
+      <span class="callout-label">key rule</span>
+      A container lives only as long as its main process lives. If that process is
+      <code>bash</code> and you type <code>exit</code>, bash stops — and since bash
+      <em>was</em> the container's main process, the container stops too. This isn't
+      a bug; it explains most "why did my container exit immediately" confusion later.
+    </div>
+
+  </div>
+
+  <div class="chapter-nav">
+    <a href="chapter1.html">
+      <span class="dir">← previous</span>
+      <span>01 · Why Docker Exists</span>
+    </a>
+    <a href="chapter3.html" class="next">
+      <span class="dir">next →</span>
+      <span>03 · Images: The Blueprint</span>
+    </a>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  built while learning docker · served by nginx:alpine
+</footer>
+
+</body>
+</html>

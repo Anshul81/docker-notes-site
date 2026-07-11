@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cheat Sheet — Docker Notes</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> docker-notes</div>
+  <div class="links">
+    <a href="index.html">chapters</a>
+    <a href="cheatsheet.html" class="active">cheat sheet</a>
+    <a href="https://github.com/" target="_blank" rel="noopener">github ↗</a>
+  </div>
+</nav>
+
+<div class="shell">
+
+  <div class="chapter-header" style="padding-top:48px;">
+    <div class="chapter-meta">reference</div>
+    <h1>Command Cheat Sheet</h1>
+  </div>
+
+  <div class="cheat-grid">
+
+    <div class="cheat-block">
+      <h3>Containers</h3>
+      <span class="cmd">docker run -d -p 8080:80 --name web nginx</span>
+      <span class="cmd-desc">create + start, detached, port mapped, named</span>
+      <span class="cmd">docker ps / docker ps -a</span>
+      <span class="cmd-desc">running only / all containers</span>
+      <span class="cmd">docker start / stop / rm &lt;name&gt;</span>
+      <span class="cmd-desc">lifecycle control</span>
+      <span class="cmd">docker exec -it &lt;name&gt; bash</span>
+      <span class="cmd-desc">enter a running container</span>
+      <span class="cmd">docker logs &lt;name&gt;</span>
+      <span class="cmd-desc">always check this first when debugging</span>
+    </div>
+
+    <div class="cheat-block">
+      <h3>Images</h3>
+      <span class="cmd">docker build -t name:tag .</span>
+      <span class="cmd-desc">build from Dockerfile in current dir</span>
+      <span class="cmd">docker images / docker rmi &lt;name&gt;</span>
+      <span class="cmd-desc">list / remove</span>
+      <span class="cmd">docker tag src:tag new/name:tag</span>
+      <span class="cmd-desc">pointer only, no data copied</span>
+      <span class="cmd">docker push / docker pull</span>
+      <span class="cmd-desc">registry round-trip</span>
+      <span class="cmd">docker history &lt;image&gt;</span>
+      <span class="cmd-desc">inspect layers</span>
+    </div>
+
+    <div class="cheat-block">
+      <h3>Volumes</h3>
+      <span class="cmd">docker volume create mydata</span>
+      <span class="cmd-desc">Docker-managed persistent storage</span>
+      <span class="cmd">-v mydata:/path/in/container</span>
+      <span class="cmd-desc">named volume mount</span>
+      <span class="cmd">-v C:/host/path:/path/in/container</span>
+      <span class="cmd-desc">bind mount — exact host path</span>
+      <span class="cmd">docker volume ls / inspect / rm / prune</span>
+      <span class="cmd-desc">manage volumes</span>
+    </div>
+
+    <div class="cheat-block">
+      <h3>Networking</h3>
+      <span class="cmd">docker network create my-net</span>
+      <span class="cmd-desc">user-defined = working DNS by name</span>
+      <span class="cmd">--network my-net</span>
+      <span class="cmd-desc">attach a container at run time</span>
+      <span class="cmd">docker network ls / inspect &lt;net&gt;</span>
+      <span class="cmd-desc">list / see members + IPs</span>
+      <span class="cmd">-p host:container</span>
+      <span class="cmd-desc">host↔container only — NOT container↔container</span>
+    </div>
+
+    <div class="cheat-block">
+      <h3>Dockerfile instructions</h3>
+      <span class="cmd">FROM image:tag</span>
+      <span class="cmd-desc">always first, pin exact version</span>
+      <span class="cmd">WORKDIR / COPY / RUN</span>
+      <span class="cmd-desc">build-time — baked into layers</span>
+      <span class="cmd">ENV KEY=default</span>
+      <span class="cmd-desc">overridable at runtime with -e</span>
+      <span class="cmd">CMD ["python", "app.py"]</span>
+      <span class="cmd-desc">runtime default, fully replaceable</span>
+      <span class="cmd">USER appuser</span>
+      <span class="cmd-desc">chown -R first, or user can't write its own files</span>
+    </div>
+
+    <div class="cheat-block">
+      <h3>Compose</h3>
+      <span class="cmd">docker compose up / up -d</span>
+      <span class="cmd-desc">start the whole stack</span>
+      <span class="cmd">docker compose up --build</span>
+      <span class="cmd-desc">use after ANY code/Dockerfile change</span>
+      <span class="cmd">docker compose down / down -v</span>
+      <span class="cmd-desc">keep volumes / also delete volumes</span>
+      <span class="cmd">docker compose logs -f &lt;service&gt;</span>
+      <span class="cmd-desc">follow one service's logs</span>
+      <span class="cmd">depends_on: condition: service_healthy</span>
+      <span class="cmd-desc">wait for real readiness, not just "started"</span>
+    </div>
+
+  </div>
+
+  <div class="section-label">quick decision rules</div>
+  <div class="prose">
+    <ul>
+      <li><strong>Named volume vs. bind mount:</strong> database data → named volume. Live code editing → bind mount.</li>
+      <li><strong>ENV vs. ARG:</strong> needed at runtime → ENV. Only needed during build → ARG.</li>
+      <li><strong>RUN vs. CMD:</strong> should happen once, at build time → RUN. Should happen every container start → CMD.</li>
+      <li><strong>Forgot to rebuild?</strong> If code changed and behavior looks stale, check whether you ran <code>--build</code>.</li>
+      <li><strong>Container-to-container not working?</strong> Confirm both are on the same <em>user-defined</em> network, and you're using the service/container name, not an IP.</li>
+    </ul>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  built while learning docker · served by nginx:alpine
+</footer>
+
+</body>
+</html>
