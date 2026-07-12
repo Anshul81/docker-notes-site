@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 10 · Image Optimization &amp; Best Practices — Docker Notes</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> docker-notes</div>
+  <div class="links">
+    <a href="index.html">chapters</a>
+    <a href="cheatsheet.html">cheat sheet</a>
+    <a href="https://github.com/" target="_blank" rel="noopener">github ↗</a>
+  </div>
+</nav>
+
+<div class="shell">
+
+  <div class="chapter-header" style="padding-top:48px;">
+    <div class="chapter-meta">chapter 10 / 10</div>
+    <h1>Image Optimization &amp; Best Practices</h1>
+  </div>
+
+  <div class="prose">
+
+    <h2>Measure before optimizing</h2>
+    <p>
+      The discipline for this whole chapter: establish a real baseline before
+      changing anything, then measure again after. Never assume an optimization
+      worked — check it the same way every bug in this course got diagnosed, with
+      actual evidence.
+    </p>
+    <pre><code>docker images | grep flask-app
+docker history flask-app:v1</code></pre>
+    <pre><code>IMAGE          CREATED BY                              SIZE
+...            CMD ["python" "app.py"]                  0B
+...            USER appuser                              0B
+...            RUN useradd --create-home appuser...      1.2MB
+...            COPY . .                                  8.4KB
+...            RUN pip install --no-cache-dir -r...      45MB
+...            COPY requirements.txt .                   68B
+...            WORKDIR /app                               0B
+...            FROM python:3.11.4-slim                  188MB</code></pre>
+    <p>
+      The base image itself (188MB) outweighs the actual dependencies (45MB) by more
+      than 4x — the biggest lever isn't trimming <code>requirements.txt</code>, it's
+      the base image choice.
+
+    <h2>slim → alpine, tested not assumed</h2>
+    <pre><code>python:3.11.4-slim     188MB base
+python:3.11.4-alpine    84MB base</code></pre>
+    <div class="callout">
+      <span class="callout-label">the real tradeoff</span>
+      Alpine uses musl libc instead of glibc — packages needing a C compiler or
+      glibc-specific behavior can fail to install. <code>psycopg2-binary</code> was
+      deliberately chosen back in Chapter 6 specifically because it ships as a
+      precompiled wheel, sidestepping this risk entirely. <code>flask</code> and
+      <code>redis</code> are pure Python. Predicted a clean build on Alpine for this
+      exact reason — and verified it directly rather than trusting the prediction alone.
+    </div>
+    <pre><code>docker build -t flask-app:alpine-test .
+docker images | grep flask-app</code></pre>
+    <pre><code>REPOSITORY   TAG           SIZE
+flask-app    v1            412MB
+flask-app    alpine-test   268MB   ← ~35% smaller, measured</code></pre>
+
+    <h2>Multi-stage builds, applied and measured — not assumed</h2>
+    <pre><code># Stage 1: install dependencies
+FROM python:3.11.4-slim AS builder
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+# Stage 2: final image
+FROM python:3.11.4-slim
+WORKDIR /app
+COPY --from=builder /root/.local /root/.local
+COPY . .
+ENV PATH=/root/.local/bin:$PATH
+
+RUN useradd --create-home appuser && \
+    chown -R appuser:appuser /app /root/.local
+USER appuser
+
+EXPOSE 5000
+CMD ["python", "app.py"]</code></pre>
+    <div class="callout bug">
+      <span class="callout-label">the intuition that turned out wrong</span>
+      Expected this to be dramatically smaller than the single-stage version — it
+      wasn't. Both stages here still start from the exact same
+      <code>python:3.11.4-slim</code> base (188MB either way). The only savings
+      possible are pip's own build cache/temp files, already handled by
+      <code>--no-cache-dir</code> in the single-stage version anyway.
+      <pre><code>flask-app    v1            412MB
+flask-app    multistage    ~405MB   ← barely different</code></pre>
+      Even combining Alpine + multi-stage together confirmed the same pattern:
+      <pre><code>flask-app    alpine-test          268MB
+flask-app    alpine-multistage    ~265MB   ← still barely different</code></pre>
+    </div>
+    <div class="callout">
+      <span class="callout-label">the rule, stated precisely</span>
+      Multi-stage builds only save meaningful size when the <strong>final stage's
+      base image is genuinely smaller</strong> than what the build stage needed —
+      like Node's dev toolchain switching to <code>nginx:alpine</code> in Chapter 8.
+      If build and runtime needs both fit in the same lightweight base already,
+      there's no smaller image to switch into, so there's nothing to save. For this
+      Flask stack, the Alpine base swap captured essentially the entire available
+      win — multi-stage on top added Dockerfile complexity with no measurable benefit.
+    </div>
+
+    <h2>Layer ordering — the real cost, timed</h2>
+    <pre><code># Correct order
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .</code></pre>
+    <pre><code>time docker build ...   # first build:  ~38s (pip install runs fully)
+# change one line in app.py
+time docker build ...   # second build: ~2s (only COPY . . rebuilds, pip CACHED)</code></pre>
+    <pre><code># Wrong order (Chapter 4's original bug)
+COPY . .
+RUN pip install --no-cache-dir -r requirements.txt</code></pre>
+    <pre><code>time docker build ...   # first build:  ~38s
+# change one line in app.py
+time docker build ...   # second build: ~38s AGAIN — pip reinstalls every time,
+                          # because COPY . . now comes first and invalidates
+                          # every layer after it on any code change</code></pre>
+    <div class="callout bug">
+      <span class="callout-label">the compounding cost, calculated</span>
+      ~36 second difference per rebuild. At roughly 20 rebuilds/day during active
+      development:
+      <pre><code>20 × 36 seconds = 720 seconds = 12 minutes wasted per day, per developer</code></pre>
+      Scales to roughly an hour a week solo, or several hours a week across a small
+      team — a real, calculable cost from getting one ordering choice wrong, not a
+      nitpick.
+    </div>
+
+    <h2>The complete, evidence-based checklist</h2>
+    <pre><code>✅ Choose the smallest viable base image
+   → measure first (docker images), don't assume alpine is always safe
+   → verify the build actually succeeds before committing (C-extension risk)
+
+✅ Correct layer ordering
+   → stable instructions (FROM, WORKDIR, dependency installs) on top
+   → volatile instructions (COPY . .) at the bottom
+   → measured cost of getting this wrong: ~19x slower rebuilds
+
+✅ Multi-stage builds — only when the final stage's base is genuinely smaller
+   → verify with docker images before/after — don't apply reflexively
+
+✅ .dockerignore — keep the build context lean
+   → excludes .git/, __pycache__/, .idea/, secrets
+
+✅ pip install --no-cache-dir
+   → skips storing pip's own download cache inside the image layer
+
+✅ Non-root USER with correct chown
+   → security best practice, not just a size concern
+
+✅ Pin exact versions, never :latest
+   → reproducibility, not just optimization
+
+✅ Health checks that verify real readiness
+   → production-readiness, covered in Chapter 8</code></pre>
+
+    <h2>Choosing a base image for a new project — a real decision process</h2>
+    <p>
+      For a Node.js API using packages with native C++ addons (a common real-world
+      case): rather than assuming Alpine will fail, the same discipline applies —
+      <strong>test it</strong>. Build against <code>alpine</code> first; if it breaks
+      with an error mentioning <code>gcc</code> or <code>node-gyp</code>, fall back to
+      <code>slim</code> or the full image, informed by an actual failure rather than
+      a guess. The lesson of this chapter isn't "avoid Alpine for compiled languages"
+      — it's "verify before committing," which often happens to land on <code>slim</code>
+      for exactly that reason.
+    </p>
+
+  </div>
+
+  <div class="chapter-nav">
+    <a href="chapter9.html">
+      <span class="dir">← previous</span>
+      <span>09 · Debugging, Logging &amp; Troubleshooting</span>
+    </a>
+    <a href="cheatsheet.html" class="next">
+      <span class="dir">next →</span>
+      <span>Command Cheat Sheet</span>
+    </a>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  built while learning docker · served by nginx:alpine
+</footer>
+
+</body>
+</html>
