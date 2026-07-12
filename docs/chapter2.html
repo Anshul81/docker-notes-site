@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 2 · Architecture &amp; Core Concepts — Docker Notes</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> docker-notes</div>
+  <div class="links">
+    <a href="index.html">chapters</a>
+    <a href="cheatsheet.html">cheat sheet</a>
+    <a href="https://github.com/" target="_blank" rel="noopener">github ↗</a>
+  </div>
+</nav>
+
+<div class="shell">
+
+  <div class="chapter-header" style="padding-top:48px;">
+    <div class="chapter-meta">chapter 02 / 07</div>
+    <h1>Docker Architecture &amp; Core Concepts</h1>
+  </div>
+
+  <div class="prose">
+
+    <h2>Who's actually doing the work?</h2>
+    <p>
+      Every time you type <code>docker run nginx</code>, something happens behind the
+      scenes involving three separate components talking to each other — not one
+      monolithic "Docker" doing everything.
+    </p>
+
+    <pre><code>┌─────────────────────────────────────────────────────┐
+│   YOU                                               │
+│    │                                                │
+│    ▼                                                │
+│  Docker CLI          ← the thing you type into      │
+│    │                                                │
+│    │  REST API calls (HTTP)                         │
+│    ▼                                                │
+│  Docker Daemon       ← the brain, always running    │
+│  (dockerd)                                          │
+│    │                                                │
+│    ├──── manages ────► Containers                   │
+│    ├──── manages ────► Images                       │
+│    ├──── manages ────► Volumes                      │
+│    ├──── manages ────► Networks                     │
+│    │                                                │
+│    │  pulls from                                    │
+│    ▼                                                │
+│  Docker Registry     ← where images live remotely   │
+│  (Docker Hub)                                       │
+└─────────────────────────────────────────────────────┘</code></pre>
+
+    <h3>Component 1 — Docker CLI</h3>
+    <p>
+      The only part you directly interact with. It does <strong>zero actual work</strong> —
+      it just translates your command into an API call and sends it to the Daemon.
+      Think of it as a waiter: it carries your order to the kitchen, but never cooks anything itself.
+    </p>
+
+    <h3>Component 2 — Docker Daemon (dockerd)</h3>
+    <p>
+      The actual brain, running silently in the background at all times. It creates
+      and runs containers, builds images, manages volumes and networks, and talks to
+      Docker Hub to pull images. This is the kitchen — it receives orders and does
+      the real cooking.
+    </p>
+
+    <h3>Component 3 — Docker Registry</h3>
+    <p>
+      Where images are stored and shared remotely. Docker Hub is the default public
+      registry — like a supermarket the kitchen visits when it needs an ingredient
+      (image) it doesn't already have locally.
+    </p>
+
+    <pre><code>You order "nginx burger" (docker run nginx)
+         │
+         ▼
+Waiter (CLI) sends order to kitchen
+         │
+         ▼
+Kitchen (Daemon) checks its fridge (local images)
+         │
+      Not there
+         │
+         ▼
+Kitchen goes to supermarket (Docker Hub)
+         │
+         ▼
+Downloads nginx, stores in fridge
+         │
+         ▼
+Creates and serves the container</code></pre>
+
+    <h2>Tracing docker run -d -p 8080:80 nginx, step by step</h2>
+    <pre><code>Step 1:  You type → docker run -d -p 8080:80 nginx
+
+Step 2:  CLI parses the command
+         Builds an API request:
+         POST /containers/create
+         {image: "nginx", ports: "8080:80", detach: true}
+
+Step 3:  CLI sends this to the Daemon via REST API
+
+Step 4:  Daemon receives it
+         Checks: "Do I have nginx image locally?"
+         Answer: NO (first time)
+
+Step 5:  Daemon contacts Docker Hub
+         GET hub.docker.com/nginx:latest
+         Downloads the image layer by layer
+
+Step 6:  Image stored locally in Daemon's image cache
+
+Step 7:  Daemon creates a container from the image
+         Assigns it: a unique ID, a name, a network interface,
+         an isolated filesystem, port mapping (8080 → 80)
+
+Step 8:  Daemon starts the container process
+         nginx web server begins running inside
+
+Step 9:  CLI receives confirmation, prints container ID,
+         returns control to you (because of -d flag)</code></pre>
+
+    <h3>Why the second run is instant</h3>
+    <p>
+      Run the same image again and there's no "Pulling from library/nginx" message —
+      it starts almost immediately. That's Step 4 shortcutting: the Daemon checks
+      locally first, finds the image already cached, and skips straight to Step 7.
+    </p>
+    <pre><code>First run:   CLI → Daemon → Hub (download) → Create → Start
+Second run:  CLI → Daemon → Local cache → Create → Start</code></pre>
+
+    <h2>The Docker object model</h2>
+    <pre><code>┌─────────────────────────────────────────────────┐
+│              Docker Objects                     │
+│  📦 Images      → blueprints (read-only)        │
+│  🏃 Containers  → running instances of images   │
+│  💾 Volumes     → persistent storage            │
+│  🌐 Networks    → communication between         │
+│                   containers                    │
+└─────────────────────────────────────────────────┘</code></pre>
+
+    <div class="callout">
+      <span class="callout-label">stop and think</span>
+      If you run 5 containers from the same nginx image simultaneously, how many
+      copies of the image exist on disk? <strong>Still just one.</strong> The image
+      is read-only; all five containers read from the same shared layers. Each
+      container only stores its own changes on top — this is exactly what makes
+      containers lightweight, and it's covered in full in Chapter 3.
+    </div>
+
+    <h2>Container lifecycle — the complete picture</h2>
+    <pre><code>              docker create
+                   │
+                   ▼
+            ┌─────────────┐
+            │   CREATED   │  ← exists but not started
+            └─────────────┘
+                   │
+            docker start
+                   │
+                   ▼
+            ┌─────────────┐
+            │   RUNNING   │  ← process is active
+            └─────────────┘
+                   │
+          ┌────────┴────────┐
+     docker stop        process exits
+          │               on its own
+          ▼                   │
+   ┌─────────────┐            │
+   │   STOPPED   │ ◄──────────┘
+   │  (Exited)   │
+   └─────────────┘
+          │
+     docker start   ← can restart a stopped container
+          │
+          ▼
+       RUNNING again
+
+   OR
+
+     docker rm      ← permanently delete
+          │
+          ▼
+       DELETED      ← gone forever</code></pre>
+    <p>
+      <code>docker run</code> is really <code>docker create</code> +
+      <code>docker start</code> combined — that's why it's the command you reach for most.
+    </p>
+
+    <div class="callout">
+      <span class="callout-label">stopped ≠ deleted</span>
+      A stopped container is like a switched-off laptop — <code>docker start</code>
+      brings it back exactly as it was. A removed container (<code>docker rm</code>)
+      is like a laptop that's been thrown away — you'd need to
+      <code>docker run</code> a completely fresh one.
+    </div>
+
+    <h2>Essential commands, with real understanding (not memorization)</h2>
+    <pre><code>docker ps                    # running containers only
+docker ps -a                 # ALL containers (running + stopped)
+docker start &lt;name/id&gt;       # start a stopped container (reuse existing)
+docker stop &lt;name/id&gt;        # stop gracefully
+docker kill &lt;name/id&gt;        # force kill immediately
+docker rm &lt;name/id&gt;          # remove a stopped container
+docker rm -f &lt;name/id&gt;       # remove a running container forcefully
+docker images                # list images
+docker rmi &lt;image&gt;           # remove an image
+docker pull ubuntu           # pull without running
+docker logs &lt;name/id&gt;        # view container logs
+docker exec -it &lt;name/id&gt; bash   # enter a running container's shell</code></pre>
+
+    <h2>How isolation actually works</h2>
+    <p>Two Linux kernel features make container isolation possible.</p>
+
+    <h3>Mechanism 1 — Namespaces (the illusion of isolation)</h3>
+    <p>
+      A namespace wraps a global system resource and makes a process think it has its
+      own private version of it. Docker uses six per container:
+    </p>
+    <pre><code>┌─────────────────────────────────────────────────────┐
+│              Container's Private View               │
+│  PID namespace    → its own process list             │
+│  NET namespace    → its own network interface + IP   │
+│  MNT namespace    → its own filesystem view          │
+│  UTS namespace    → its own hostname                 │
+│  IPC namespace    → its own inter-process comms      │
+│  USER namespace   → its own user IDs                 │
+└─────────────────────────────────────────────────────┘</code></pre>
+    <div class="callout">
+      <span class="callout-label">analogy</span>
+      Imagine a hotel where every floor has its own "Room 101" on the map. Guests
+      don't share rooms — they each have a private view of the same building.
+      Namespaces work the same way: your app inside a container thinks it's Process 1,
+      even though a "real" Process 1 also exists on the host. Two different
+      namespaces, no conflict, no visibility into each other.
+    </div>
+
+    <h3>Mechanism 2 — Cgroups (the resource police)</h3>
+    <p>
+      Namespaces handle isolation. Cgroups (control groups) handle
+      <strong>resource limits</strong> — how much CPU, RAM, disk I/O, and network a
+      process can actually consume.
+    </p>
+    <pre><code>Without cgroups:
+Container A goes rogue, uses 100% CPU
+→ Container B starves → whole machine slows down
+→ production is down → you're getting paged at 3am
+
+With cgroups:
+Container A limited to 25% CPU, 512MB RAM
+→ even if it goes rogue, it can't take more
+→ Container B unaffected → you sleep peacefully</code></pre>
+    <pre><code>docker run -d --memory="512m" --cpus="0.5" nginx</code></pre>
+
+    <div class="callout">
+      <span class="callout-label">putting it together</span>
+      A container = a process + namespaces (isolated view) + cgroups (limited
+      resources) + a filesystem from the image. No mini-OS, no magic — just a
+      process with walls around it and a ceiling above it. That's why containers
+      start in milliseconds: there's no OS to boot, just a process starting with
+      kernel features wrapping it in isolation.
+    </div>
+
+    <h2>docker exec — entering a running container</h2>
+    <pre><code>docker run -d -p 8080:80 --name my-nginx nginx
+docker exec -it my-nginx bash
+# prompt becomes: root@0ab4cf6d5bc4:/#
+ls
+cat /etc/os-release
+exit</code></pre>
+    <p>
+      <code>-i</code> keeps stdin open (interactive), <code>-t</code> allocates a
+      terminal so you actually see a prompt. Use <code>-it</code> when exploring or
+      debugging live. Use <code>-d</code> for background, long-running services like
+      web servers and databases.
+    </p>
+
+    <div class="callout bug">
+      <span class="callout-label">key rule, learned by breaking it</span>
+      A container lives only as long as its <strong>main process</strong> lives. In
+      <code>docker run -it ubuntu bash</code>, bash <em>is</em> the main process.
+      Typing <code>exit</code> stops bash — and since there's no other process
+      keeping the container alive, the container stops too, immediately. This isn't
+      a bug; it's the single most common cause of "why did my container exit
+      immediately?" confusion, and it explains itself once you know this rule.
+    </div>
+
+    <p>
+      Verified directly: running <code>docker exec -it my-nginx bash</code> after
+      <code>docker rm my-nginx</code> returns <code>Error: No such container</code> —
+      because removal (not stopping) permanently deletes the container, so there's
+      nothing left to exec into.
+    </p>
+
+    <h2>Docker Hub — the registry, in more detail</h2>
+    <pre><code>┌─────────────────────────────────────────────────┐
+│                  Docker Hub                     │
+│  Official Images        Community Images        │
+│  ┌─────────────┐        ┌─────────────┐         │
+│  │   nginx     │        │  user/app   │         │
+│  │   postgres  │        │  company/api│         │
+│  │   python    │        │  team/model │         │
+│  │   ubuntu    │        └─────────────┘         │
+│  │   redis     │                                │
+│  └─────────────┘                                │
+│  Maintained by          Maintained by           │
+│  Docker/vendors         anyone                  │
+└─────────────────────────────────────────────────┘</code></pre>
+    <p>
+      Official images (<code>nginx</code>, <code>postgres</code>, <code>python</code>)
+      are maintained by Docker or the software vendors themselves — secure,
+      optimized, regularly updated. Always prefer these over random community images
+      when one exists for what you need.
+    </p>
+    <pre><code>nginx                    → official image, latest tag
+nginx:1.25               → official image, specific version
+username/myapp           → community image
+username/myapp:v2.1      → community image, specific version</code></pre>
+
+  </div>
+
+  <div class="chapter-nav">
+    <a href="chapter1.html">
+      <span class="dir">← previous</span>
+      <span>01 · Why Docker Exists</span>
+    </a>
+    <a href="chapter3.html" class="next">
+      <span class="dir">next →</span>
+      <span>03 · Images: The Blueprint</span>
+    </a>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  built while learning docker · served by nginx:alpine
+</footer>
+
+</body>
+</html>

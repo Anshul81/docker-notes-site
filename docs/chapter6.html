@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 6 · Networking — Docker Notes</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> docker-notes</div>
+  <div class="links">
+    <a href="index.html">chapters</a>
+    <a href="cheatsheet.html">cheat sheet</a>
+    <a href="https://github.com/" target="_blank" rel="noopener">github ↗</a>
+  </div>
+</nav>
+
+<div class="shell">
+
+  <div class="chapter-header" style="padding-top:48px;">
+    <div class="chapter-meta">chapter 06 / 07</div>
+    <h1>Networking in Docker</h1>
+  </div>
+
+  <div class="prose">
+
+    <h2>The problem: two isolated islands</h2>
+    <p>
+      A Flask container and a PostgreSQL container are two completely separate,
+      namespaced processes (Chapter 2) — no shared filesystem, no shared process
+      list. Manually running SQL via <code>docker exec</code> every time isn't how
+      real applications talk to a database. A real app needs to connect to it over
+      the network, like it would with any external database server.
+    </p>
+
+    <h2>The tempting but wrong first guess</h2>
+    <p>
+      The instinct is often "they need connected ports." Testing that against
+      something already known: <code>-p 5000:5000</code> was used back in Chapter 1
+      to open <code>localhost:8080</code> in a browser. Who was on the other end of
+      that — another container, or the browser on the host machine?
+    </p>
+    <div class="callout">
+      <span class="callout-label">the actual answer</span>
+      <code>-p</code> connects your <strong>laptop</strong> to a container. It has
+      nothing to do with letting two containers reach each other — that's a
+      completely separate mechanism.
+    </div>
+
+    <h2>The default bridge network's real limitation</h2>
+    <p>
+      Every container attaches to Docker's default <code>bridge</code> network unless
+      told otherwise:
+    </p>
+    <pre><code>docker network ls
+# NETWORK ID     NAME      DRIVER    SCOPE
+# xxxxxxxxxxxx   bridge    bridge    local
+# xxxxxxxxxxxx   host      host      local
+# xxxxxxxxxxxx   none      null      local</code></pre>
+    <p>
+      On the default bridge, containers can only reach each other by
+      <strong>IP address</strong> — name-based DNS resolution simply doesn't work
+      there (a real, documented Docker limitation, kept mainly for backward
+      compatibility). Since internal IPs are reassigned on every restart, hardcoding
+      one into an app's config is fragile and will eventually break.
+    </p>
+    <pre><code>Default bridge network:
+  flask-app tries: my-postgres        ❌ fails, no DNS resolution
+  flask-app tries: 10.0.1.3           ✅ works, but IP changes on restart</code></pre>
+
+    <h2>The fix — user-defined networks</h2>
+    <pre><code>docker network create my-app-network
+
+docker run -d --name my-postgres --network my-app-network \
+  -e POSTGRES_PASSWORD=mysecretpassword \
+  -v pgdata:/var/lib/postgresql/data \
+  postgres:16
+
+docker run -d --name flask-app --network my-app-network \
+  -p 5000:5000 \
+  flask-app:v1</code></pre>
+    <p>
+      On a <strong>user-defined</strong> network, Docker provides working built-in
+      DNS — any container can reach another by its <strong>container name</strong>,
+      and that resolution stays correct even after a restart changes the underlying IP.
+    </p>
+    <pre><code>User-defined network:
+  flask-app tries: my-postgres    ✅ works! Docker resolves it automatically
+                                      to whatever IP it currently has</code></pre>
+
+    <pre><code>Your Machine
+┌──────────────────────────────────────────────┐
+│   Docker Network: "my-app-network"           │
+│   ┌──────────────┐      ┌──────────────┐    │
+│   │  flask-app   │◄────►│ my-postgres  │    │
+│   │  10.0.1.2    │      │  10.0.1.3    │    │
+│   └──────────────┘      └──────────────┘    │
+│         │                                    │
+│         │ -p 5000:5000                       │
+│         ▼                                    │
+│   http://localhost:5000  ← YOU access here   │
+└──────────────────────────────────────────────┘</code></pre>
+
+    <h2>Proven two independent ways, not assumed</h2>
+    <pre><code>docker exec -it flask-app bash
+python3 -c "import socket; print(socket.gethostbyname('my-postgres'))"
+# → 172.18.0.2</code></pre>
+    <pre><code>docker network inspect my-app-network</code></pre>
+    <pre><code>"Containers": {
+    "2071cdf6...": {
+        "Name": "my-postgres",
+        "IPv4Address": "172.18.0.2/16"
+    },
+    "98be598e...": {
+        "Name": "flask-app",
+        "IPv4Address": "172.18.0.3/16"
+    }
+}</code></pre>
+    <p>
+      Two completely independent sources — Python's own DNS lookup, and Docker's own
+      network records — agreeing on the exact same IP. That's real proof, not a lucky coincidence.
+    </p>
+
+    <h2>Real connection code</h2>
+    <pre><code>DB_HOST = os.environ.get('DB_HOST', 'my-postgres')  # container name, not IP</code></pre>
+    <p>
+      Same ENV-as-default pattern from Chapter 4, now applied to networking — the
+      container name is stable and overridable, unlike a hardcoded IP that would
+      break on the next restart.
+    </p>
+
+    <h2>Wiring it into Flask for real</h2>
+    <pre><code>import psycopg2
+
+@app.route('/students')
+def get_students():
+    conn = psycopg2.connect(
+        host=os.environ.get('DB_HOST', 'my-postgres'),
+        database='postgres',
+        user='postgres',
+        password=os.environ.get('DB_PASSWORD', 'mysecretpassword')
+    )
+    cur = conn.cursor()
+    cur.execute('SELECT id, name FROM students;')
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    students = [{"id": r[0], "name": r[1]} for r in rows]
+    return {"students": students}</code></pre>
+
+    <div class="callout bug">
+      <span class="callout-label">debugging detour: "relation students does not exist" — again</span>
+      Hit the exact same error message as Chapter 5's typo bug — but this time the
+      volume path was verified correct from the start. That ruled out a repeat of the
+      earlier mistake, so the investigation went further:
+      <ol>
+        <li>Checked <code>docker logs my-postgres</code> — found:
+          <code>"PostgreSQL Database directory appears to contain a database; Skipping initialization"</code>
+          — meaning Postgres genuinely loaded the existing volume, not a fresh one.</li>
+        <li>Compared the volume's <code>CreatedAt</code> timestamp against Postgres's
+          own crash-recovery log line (<code>"database system was interrupted; last
+          known up at ..."</code>) — the timestamps lined up, initially suggesting
+          continuity with the earlier working session.</li>
+        <li>Checked the actual data directory size on disk:
+          <code>du -sh /var/lib/postgresql/data</code> → <code>39M</code> — the size
+          of a freshly-initialized, genuinely empty Postgres data directory (just
+          internal system catalogs and WAL logs), not one that had ever held a real table.</li>
+      </ol>
+      <strong>Conclusion:</strong> the <code>pgdata</code> volume had, at some point
+      between sessions, been wiped and recreated fresh — most likely during earlier
+      cleanup commands (<code>docker volume rm pgdata</code> / <code>prune</code>)
+      run while fixing the Chapter 5 typo bug. The networking mechanism itself was
+      never broken — DNS resolution had already been proven correct, independently,
+      before this error even showed up. Recreated the table, and the full chain
+      worked end to end:
+      <pre><code>{"students": [{"id": 1, "name": "Anshul"}]}</code></pre>
+      Browser → Flask (via <code>-p</code>) → DNS-resolved <code>my-postgres</code> →
+      real Postgres query → JSON back out.
+    </div>
+
+    <h2>Useful commands</h2>
+    <pre><code>docker network ls
+docker network create my-app-network
+docker network inspect my-app-network</code></pre>
+
+  </div>
+
+  <div class="chapter-nav">
+    <a href="chapter5.html">
+      <span class="dir">← previous</span>
+      <span>05 · Volumes &amp; Persistent Storage</span>
+    </a>
+    <a href="chapter7.html" class="next">
+      <span class="dir">next →</span>
+      <span>07 · Docker Compose</span>
+    </a>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  built while learning docker · served by nginx:alpine
+</footer>
+
+</body>
+</html>

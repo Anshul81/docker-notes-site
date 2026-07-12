@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 7 · Docker Compose — Docker Notes</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> docker-notes</div>
+  <div class="links">
+    <a href="index.html">chapters</a>
+    <a href="cheatsheet.html">cheat sheet</a>
+    <a href="https://github.com/" target="_blank" rel="noopener">github ↗</a>
+  </div>
+</nav>
+
+<div class="shell">
+
+  <div class="chapter-header" style="padding-top:48px;">
+    <div class="chapter-meta">chapter 07 / 07</div>
+    <h1>Docker Compose</h1>
+  </div>
+
+  <div class="prose">
+
+    <h2>Why Compose exists</h2>
+    <p>Getting Flask and Postgres talking manually (Chapter 6) took four separate commands:</p>
+    <pre><code>docker network create my-app-network
+docker volume create pgdata
+docker run -d --name my-postgres --network my-app-network \
+  -e POSTGRES_PASSWORD=mysecretpassword \
+  -v pgdata:/var/lib/postgresql/data \
+  postgres:16
+docker run -d --name flask-app --network my-app-network \
+  -p 5000:5000 \
+  flask-app:v2</code></pre>
+    <p>
+      Each with multiple flags, run in a specific order — get the order wrong, forget
+      a flag, or typo a path (as happened twice already), and you're debugging for an
+      hour. A real production stack might have 5 services, each with volumes,
+      networks, and env vars. Compose describes the entire stack in one YAML file,
+      brought up with a single command.
+    </p>
+    <div class="callout">
+      <span class="callout-label">analogy</span>
+      Individual <code>docker run</code> commands are verbal instructions for
+      assembling furniture piece by piece. A Compose file is the IKEA manual — one
+      document, fully specified, reproducible by anyone who opens it.
+    </div>
+
+    <h2>Anatomy of a Compose file</h2>
+    <pre><code>services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: mysecretpassword
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  flask-app:
+    build: .
+    ports:
+      - "5000:5000"
+    depends_on:
+      - postgres
+
+volumes:
+  pgdata:</code></pre>
+    <p>
+      Every container is a <strong>service</strong> — the YAML key (<code>postgres</code>,
+      <code>flask-app</code>) is the service name. <code>build: .</code> instead of
+      <code>image:</code> tells Compose to run <code>docker build</code> automatically
+      from the Dockerfile in the current directory. <code>depends_on</code> controls
+      startup order.
+    </p>
+
+    <h2>Compose's automatic networking</h2>
+    <p>
+      Notably absent from the file: <code>docker network create</code>. When you run
+      <code>docker compose up</code>, Compose automatically:
+    </p>
+    <pre><code>1. Creates ONE user-defined network for this entire project
+   (named something like "chapter7_default")
+2. Attaches EVERY service in the file to that network
+3. Each service becomes reachable by its SERVICE NAME
+   (not container_name — the YAML key itself)</code></pre>
+    <p>Exactly what was done manually in Chapter 6 — Compose just does it silently, every time.</p>
+
+    <div class="callout bug">
+      <span class="callout-label">service name vs. container_name — not the same thing</span>
+      DNS resolution on the Compose network uses the <strong>service name</strong>
+      (the YAML key), not <code>container_name</code>, which is purely cosmetic —
+      it only affects what shows in <code>docker ps</code>/<code>docker logs</code>
+      and has zero effect on networking. Removing <code>container_name</code>
+      entirely changes nothing about whether other services can reach it — the
+      service name always works as the hostname, with or without it.
+    </div>
+
+    <h2>Running it, and reading the evidence</h2>
+    <pre><code>docker compose up
+
+docker compose ps
+# NAME                   SERVICE     STATUS
+# chapter7-flask-app-1   flask-app   Up
+# chapter7-postgres-1    postgres    Up
+
+docker network ls
+# chapter7_default   bridge   local   ← Compose's auto-created network
+
+docker volume ls
+# chapter7_pgdata                     ← Compose's auto-created volume</code></pre>
+    <p>
+      Naming pattern: <code>&lt;project-folder&gt;-&lt;service-name&gt;-&lt;instance-number&gt;</code>.
+      The <code>-1</code> exists because Compose supports scaling multiple instances
+      of the same service.
+    </p>
+
+    <div class="callout bug">
+      <span class="callout-label">a fresh project means a fresh volume</span>
+      <code>chapter7_pgdata</code> is a completely <strong>different, brand-new</strong>
+      volume from Chapter 6's <code>pgdata</code> — proven by checking
+      <code>docker volume ls</code> directly. Predicting correctly ahead of time: a
+      fresh volume means <code>/students</code> would fail with the same
+      <code>relation "students" does not exist</code> error, since nothing has ever
+      written to this volume yet — confirmed on the first request.
+    </div>
+
+    <h2>Fixing it properly — automatic DB initialization</h2>
+    <p>
+      Rather than manually running <code>psql</code> every time, the official
+      <code>postgres</code> image auto-executes any <code>.sql</code> file placed in
+      <code>/docker-entrypoint-initdb.d/</code> — but <strong>only</strong> the very
+      first time it starts against a genuinely empty data directory.
+    </p>
+    <pre><code>-- init.sql
+CREATE TABLE students (id SERIAL PRIMARY KEY, name TEXT);
+INSERT INTO students (name) VALUES ('Anshul');</code></pre>
+    <pre><code>services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: mysecretpassword
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  flask-app:
+    build: .
+    ports:
+      - "5000:5000"
+    depends_on:
+      - postgres
+    environment:
+      DB_HOST: postgres
+
+volumes:
+  pgdata:</code></pre>
+    <p>
+      <code>./init.sql:/docker-entrypoint-initdb.d/init.sql</code> is a bind mount —
+      mapping a local file into the exact folder Postgres checks on startup.
+    </p>
+
+    <div class="callout bug">
+      <span class="callout-label">init only runs on a genuinely fresh volume</span>
+      Since <code>chapter7_pgdata</code> already had system files in it from the
+      earlier failed attempt, simply adding <code>init.sql</code> and restarting
+      wasn't enough — Postgres would still skip initialization, same as always. Fix:
+      force a truly fresh volume.
+      <pre><code>docker compose down -v   # -v also removes volumes declared in this file
+docker compose up</code></pre>
+      <code>docker compose down</code> alone keeps volumes intact (safe, data
+      survives). Adding <code>-v</code> explicitly destroys them — never run
+      <code>-v</code> in a real project without being certain.
+    </div>
+
+    <h2>depends_on ≠ ready</h2>
+    <div class="callout bug">
+      <span class="callout-label">the real gap</span>
+      <code>depends_on</code> only guarantees the dependency's <strong>container
+      process starts</strong> before the dependent service starts — not that it's
+      actually finished initializing and ready to accept connections.
+      <pre><code>Timeline:
+0s   postgres container process starts
+0-3s postgres is initializing internally (system files, init.sql, opening its port)
+1s   flask-app starts (depends_on satisfied — postgres STARTED)
+1s   flask-app tries to connect → CONNECTION REFUSED (not listening yet!)
+3s   postgres finally ready</code></pre>
+      A real, common production bug — a race condition that may not fail every time,
+      which makes it worse than a consistent failure (harder to reproduce and debug).
+    </div>
+    <p>The fix: <strong>health checks</strong>, which actually verify readiness rather than just process start:</p>
+    <pre><code>services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: mysecretpassword
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  flask-app:
+    build: .
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres</code></pre>
+    <p>
+      <code>depends_on: postgres: condition: service_healthy</code> means "don't
+      start <code>flask-app</code> until Postgres's healthcheck actually passes" —
+      not just "until the process started."
+    </p>
+
+    <h2>--build vs. plain up</h2>
+    <div class="callout bug">
+      <span class="callout-label">why code changes can silently not apply</span>
+      <code>docker compose up</code> only triggers a build automatically the very
+      first time (when no image exists yet). Every time after that, it reuses
+      whatever image is cached, completely unaware the code changed.
+      <pre><code>docker compose up --build</code></pre>
+      Rule: any time the Dockerfile, <code>requirements.txt</code>, or app code
+      changes, use <code>--build</code> — or the change silently won't apply. Caught
+      this directly: added Redis to <code>app.py</code>, ran plain
+      <code>docker compose up</code>, and the <code>/students</code> response was
+      missing the new <code>"source"</code> field entirely — proof the old, cached
+      image was still running. <code>docker compose down &amp;&amp; docker compose up
+      --build</code> fixed it.
+    </p>
+    </div>
+    <div class="callout">
+      <span class="callout-label">a separate concern: init.sql changes</span>
+      Changing <code>init.sql</code> needs <code>down -v</code> + <code>up</code>
+      (force a fresh volume), <strong>not</strong> <code>--build</code> — since init
+      scripts are bind-mounted in, not baked into the image at all. Code changes and
+      data/schema changes are two independent problems with two independent fixes.
+    </div>
+
+    <h2>Mini Project 4 — adding Redis for caching</h2>
+    <p>
+      Redis is an in-memory key-value store — extremely fast, typically used for
+      temporary or frequently-accessed data rather than permanent records. Real
+      pattern: cache <code>/students</code> so repeated requests don't all hit Postgres.
+    </p>
+    <pre><code>Without caching:                  With Redis caching:
+Request → Flask → Postgres        Request 1 → Flask → Postgres → Redis (store)
+Request → Flask → Postgres        Request 2 → Flask → Redis (fast, no Postgres hit)
+Request → Flask → Postgres        Request 3 → Flask → Redis (fast, no Postgres hit)</code></pre>
+
+    <pre><code>services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: mysecretpassword
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  flask-app:
+    build: .
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      REDIS_HOST: redis
+
+volumes:
+  pgdata:</code></pre>
+
+    <pre><code>import redis, json
+
+redis_client = redis.Redis(
+    host=os.environ.get('REDIS_HOST', 'redis'),
+    port=6379,
+    decode_responses=True
+)
+
+@app.route('/students')
+def get_students():
+    cached = redis_client.get('students_cache')
+    if cached:
+        return {"students": json.loads(cached), "source": "cache"}
+
+    conn = psycopg2.connect(
+        host=os.environ.get('DB_HOST', 'postgres'),
+        database='postgres', user='postgres',
+        password=os.environ.get('DB_PASSWORD', 'mysecretpassword')
+    )
+    cur = conn.cursor()
+    cur.execute('SELECT id, name FROM students;')
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+
+    students = [{"id": r[0], "name": r[1]} for r in rows]
+    redis_client.setex('students_cache', 30, json.dumps(students))
+    return {"students": students, "source": "database"}</code></pre>
+    <p>
+      Check Redis first. On a hit, return immediately — never touches Postgres.
+      On a miss, query Postgres, then <code>setex</code> ("set with expiry") stores
+      the result for 30 seconds. After that, the next request naturally falls through
+      to Postgres again, keeping the cache from serving stale data forever — a real
+      tradeoff every caching system makes between performance and freshness.
+    </p>
+
+    <div class="callout">
+      <span class="callout-label">full cache lifecycle, predicted correctly then verified</span>
+      <pre><code>Request 1 (fresh restart): source = "database"   (nothing cached yet)
+Request 2, 3 (within 30s): source = "cache"       (Redis hit, no Postgres touch)
+Request 4 (after 35s+):    source = "database"    (key expired, re-cached)</code></pre>
+      Exactly matches how <code>setex('students_cache', 30, ...)</code> is designed
+      to behave — verified live by hitting the endpoint repeatedly and watching the
+      <code>source</code> field flip at precisely the expected boundary.
+    </div>
+
+    <h2>down vs. down -v</h2>
+    <table>
+      <tr><th>Command</th><th>Containers</th><th>Network</th><th>Volumes</th></tr>
+      <tr><td><code>docker compose down</code></td><td>removed</td><td>removed</td><td>kept</td></tr>
+      <tr><td><code>docker compose down -v</code></td><td>removed</td><td>removed</td><td>deleted</td></tr>
+    </table>
+
+    <h2>Project-scoped naming — why it matters</h2>
+    <p>
+      Compose prefixes volumes and networks with the project folder name
+      (<code>chapter7_pgdata</code>, <code>chapter7_default</code>). Without this, two
+      unrelated projects on the same machine both naming a volume <code>pgdata</code>
+      would collide — Project B's database could accidentally read or corrupt Project
+      A's data just from a name clash. Prefixing guarantees every project gets
+      isolated volumes and networks by default, even when the same short names are
+      reused inside each YAML file.
+    </p>
+
+    <h2>Compose command reference</h2>
+    <pre><code>docker compose up              # start (foreground)
+docker compose up -d           # start (detached)
+docker compose up --build      # rebuild images first — use after ANY code change
+docker compose ps              # project-scoped container list
+docker compose logs -f &lt;svc&gt;   # follow logs for one service
+docker compose down            # stop + remove containers/network, KEEP volumes
+docker compose down -v         # also DELETE volumes
+docker compose restart &lt;svc&gt;   # restart one service</code></pre>
+
+  </div>
+
+  <div class="chapter-nav">
+    <a href="chapter6.html">
+      <span class="dir">← previous</span>
+      <span>06 · Networking</span>
+    </a>
+    <a href="cheatsheet.html" class="next">
+      <span class="dir">next →</span>
+      <span>Command Cheat Sheet</span>
+    </a>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  built while learning docker · served by nginx:alpine
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 4 · Dockerfiles — Docker Notes</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> docker-notes</div>
+  <div class="links">
+    <a href="index.html">chapters</a>
+    <a href="cheatsheet.html">cheat sheet</a>
+    <a href="https://github.com/" target="_blank" rel="noopener">github ↗</a>
+  </div>
+</nav>
+
+<div class="shell">
+
+  <div class="chapter-header" style="padding-top:48px;">
+    <div class="chapter-meta">chapter 04 / 07</div>
+    <h1>Dockerfiles: Building Your Own Images</h1>
+  </div>
+
+  <div class="prose">
+
+    <h2>The big shift — from consumer to producer</h2>
+    <p>
+      Up to this point, every image used (nginx, ubuntu, hello-world) was built by
+      someone else. From here, that changes — every real Docker project starts with
+      writing a Dockerfile.
+    </p>
+    <div class="callout">
+      <span class="callout-label">analogy</span>
+      A Dockerfile is a cooking recipe. It lists exact ingredients and exact steps in
+      exact order. Anyone who follows the same recipe gets the same dish — on any
+      machine, anywhere in the world.
+    </div>
+    <pre><code>Recipe (Dockerfile)          Result (Image)
+───────────────────          ──────────────
+Start with Ubuntu      →     Base layer
+Install Python         →     + Python layer
+Copy my code           →     + Code layer
+Install dependencies   →     + Dependencies layer
+Set startup command    →     Final image ready to run</code></pre>
+    <p>Docker reads the file top to bottom, executes each instruction, and each instruction creates one layer.</p>
+
+    <h2>The absolute minimum Dockerfile</h2>
+    <pre><code>FROM ubuntu:22.04
+CMD ["echo", "Hello from my first image!"]</code></pre>
+    <p>
+      <code>FROM</code> sets the base image — every Dockerfile must start with it.
+      <code>ubuntu:22.04</code> instead of <code>ubuntu:latest</code>, for the same
+      reproducibility reason covered in Chapter 3.
+    </p>
+    <p>
+      <code>CMD</code> defines the default command that runs when a container starts —
+      it does <strong>not</strong> run during <code>docker build</code>, only at
+      <code>docker run</code>. The exec form <code>["echo", "..."]</code> is preferred
+      over shell form (<code>CMD echo ...</code>) — more predictable, handles signals correctly.
+    </p>
+    <pre><code>docker build -t my-first-image:v1 .
+docker run my-first-image:v1
+# → Hello from my first image!</code></pre>
+    <p>
+      The trailing <code>.</code> in <code>docker build</code> is the
+      <strong>build context</strong> — it tells Docker "send everything in this
+      directory to the Daemon for the build." Large folders slow builds down even for
+      files you don't actually need — solved with <code>.dockerignore</code>, which
+      works exactly like <code>.gitignore</code>.
+    </p>
+
+    <h2>Every core instruction, explained</h2>
+
+    <table>
+      <tr><th>Instruction</th><th>Runs</th><th>Purpose</th></tr>
+      <tr><td><code>FROM</code></td><td>build</td><td>Base image — always first line</td></tr>
+      <tr><td><code>WORKDIR</code></td><td>build</td><td>Sets working directory for everything after</td></tr>
+      <tr><td><code>COPY</code></td><td>build</td><td>Copies files from build context into the image</td></tr>
+      <tr><td><code>RUN</code></td><td>build</td><td>Executes a command, result baked into a layer permanently</td></tr>
+      <tr><td><code>ENV</code></td><td>build + runtime</td><td>Sets a default env var, overridable at <code>docker run</code></td></tr>
+      <tr><td><code>ARG</code></td><td>build only</td><td>Build-time-only variable, not visible at runtime</td></tr>
+      <tr><td><code>EXPOSE</code></td><td>documentation</td><td>Documents the port — doesn't actually publish it</td></tr>
+      <tr><td><code>USER</code></td><td>build + runtime</td><td>Switches to a non-root user</td></tr>
+      <tr><td><code>CMD</code></td><td>runtime</td><td>Default command — fully overridable at <code>docker run</code></td></tr>
+      <tr><td><code>ENTRYPOINT</code></td><td>runtime</td><td>Fixed command — runtime args are appended, not replaced</td></tr>
+    </table>
+
+    <h3>WORKDIR</h3>
+    <p>
+      Sets the working directory inside the container for all following instructions.
+      If it doesn't exist, Docker creates it. Without it, files land in <code>/</code> —
+      messy and potentially risky. Equivalent to <code>mkdir /app && cd /app</code>.
+    </p>
+
+    <h3>COPY</h3>
+    <pre><code>COPY &lt;source on your machine&gt;  &lt;destination in image&gt;
+COPY requirements.txt .        → copy to current WORKDIR (/app)
+COPY . .                       → copy everything to /app
+COPY src/ /app/src/            → copy folder to specific path</code></pre>
+
+    <h3>RUN vs. CMD — the most important early distinction</h3>
+    <pre><code>RUN   → executes during IMAGE BUILD
+        result is baked into the image layer, permanent
+
+CMD   → executes when CONTAINER STARTS
+        runs every time you do docker run
+        not baked in — just metadata</code></pre>
+
+    <h3>EXPOSE</h3>
+    <p>
+      Documents that a container listens on a given port. It does <strong>not</strong>
+      actually publish the port — that's what <code>-p</code> at <code>docker run</code>
+      does. Think of <code>EXPOSE</code> as the Dockerfile telling other developers
+      "this app uses port 5000," nothing more.
+    </p>
+
+    <h2>Layer caching — order matters, with real numbers</h2>
+    <pre><code>COPY requirements.txt .              # changes rarely
+RUN pip install -r requirements.txt  # slow step — want this cached
+COPY . .                             # changes constantly — put last</code></pre>
+    <pre><code>First build:
+  Layer 1: FROM python:3.11-slim     → downloaded
+  Layer 2: WORKDIR /app              → created
+  Layer 3: COPY requirements.txt     → copied
+  Layer 4: RUN pip install           → installed (slow, 30 seconds)
+  Layer 5: COPY . .                  → copied
+
+Change one line in app.py, rebuild:
+  Layer 1: FROM python:3.11-slim     → CACHED ✅
+  Layer 2: WORKDIR /app              → CACHED ✅
+  Layer 3: COPY requirements.txt     → CACHED ✅ (unchanged)
+  Layer 4: RUN pip install           → CACHED ✅ (requirements unchanged!)
+  Layer 5: COPY . .                  → REBUILT (app.py changed)</code></pre>
+    <p>pip install (the slow step) stays cached — rebuild takes 2 seconds instead of 35.</p>
+
+    <div class="callout bug">
+      <span class="callout-label">what happens if you get the order wrong</span>
+      <pre><code>COPY . .                              # includes app.py
+RUN pip install -r requirements.txt</code></pre>
+      Now changing <em>any</em> line in <code>app.py</code> invalidates the
+      <code>COPY . .</code> layer — which invalidates <code>RUN pip install</code> too,
+      since every layer after a changed one gets rebuilt. 35 seconds wasted on every
+      single code change, forever. <strong>Rule:</strong> most stable instructions at
+      the top, most volatile (your code) at the bottom.
+    </div>
+
+    <h2>ENTRYPOINT vs. CMD — the distinction that trips everyone</h2>
+    <pre><code># CMD only — fully replaceable
+CMD ["python", "app.py"]
+docker run flask-app:v1                    # runs: python app.py
+docker run flask-app:v1 python other.py   # runs: python other.py (overridden)
+docker run flask-app:v1 bash              # runs: bash (overridden)</code></pre>
+    <pre><code># ENTRYPOINT only — runtime args are APPENDED, not replaced
+ENTRYPOINT ["python", "app.py"]
+docker run flask-app:v1                   # runs: python app.py
+docker run flask-app:v1 --debug           # runs: python app.py --debug
+docker run flask-app:v1 bash             # runs: python app.py bash (appended!)</code></pre>
+    <pre><code># Using both together — the most flexible pattern
+ENTRYPOINT ["python"]
+CMD ["app.py"]
+docker run flask-app:v1              # runs: python app.py
+docker run flask-app:v1 other.py    # runs: python other.py (CMD overridden)
+docker run flask-app:v1 --version   # runs: python --version</code></pre>
+    <div class="callout">
+      <span class="callout-label">mental model</span>
+      ENTRYPOINT = the verb (always "python"). CMD = the noun (default "app.py", but
+      changeable). Web servers typically use CMD only (simple, flexible). CLI tools
+      often use both. Database images tend to fix behavior with ENTRYPOINT alone.
+    </div>
+
+    <h2>ADD vs. COPY</h2>
+    <p>
+      <code>ADD</code> does everything <code>COPY</code> does, plus auto-extracting
+      tar archives and downloading from URLs. <strong>Best practice: always use
+      COPY</strong> unless you specifically need those extras — COPY is explicit and
+      predictable; ADD's automatic behavior can surprise you.
+    </p>
+
+    <h2>ENV — runtime-configurable defaults</h2>
+    <pre><code>ENV APP_ENV=production
+ENV PORT=5000</code></pre>
+    <pre><code>import os
+port = int(os.environ.get('PORT', 5000))
+app_env = os.environ.get('APP_ENV', 'development')</code></pre>
+    <p>
+      <code>ENV</code> in a Dockerfile is a <strong>default</strong>, not a locked
+      value — <code>-e</code> at <code>docker run</code> always overrides it:
+    </p>
+    <pre><code>docker run -e DB_HOST=postgres-server -e APP_ENV=staging flask-app:v1</code></pre>
+    <div class="callout">
+      <span class="callout-label">why this matters</span>
+      This is the whole point of ENV: <strong>build once, configure at runtime.</strong>
+      Same image ID deployed to staging, testing, and production — only the
+      environment variable changes at the door. The exact image you tested is the
+      exact image you deploy; nothing gets rebuilt between environments, so there's
+      no "worked in staging, broke in prod because something was different" risk.
+    </div>
+
+    <h2>ARG — build-time-only variables</h2>
+    <pre><code>ARG PYTHON_VERSION=3.11
+FROM python:${PYTHON_VERSION}-slim
+
+ARG APP_VERSION=1.0.0
+RUN echo "Building version ${APP_VERSION}"
+# docker build --build-arg APP_VERSION=2.1.0 -t myapp:v2 .</code></pre>
+    <p><code>ARG</code> → build config. <code>ENV</code> → application config, available at runtime too.</p>
+
+    <h2>USER — don't run as root</h2>
+    <p>
+      By default, everything in a container runs as <code>root</code>. If an attacker
+      exploits the app and breaks out of the container, they're root inside it — a
+      real security risk.
+    </p>
+    <pre><code>FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
+
+RUN useradd --create-home appuser && \
+    chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 5000
+CMD ["python", "app.py"]</code></pre>
+
+    <div class="callout bug">
+      <span class="callout-label">real bug: the ownership trap</span>
+      <code>COPY</code> runs as <code>root</code> by default — before
+      <code>USER appuser</code> takes effect — so every copied file is owned by
+      <code>root:root</code>. Switching to a non-root user afterward
+      <em>without</em> a <code>chown -R</code> means that user technically can't
+      write to its own app directory. This often looks fine in a simple demo (just
+      reading one Python file), but breaks the moment the app needs to write logs or
+      handle uploads. Verified the fix directly:
+      <pre><code>appuser@36a6668d33a8:/app$ whoami
+appuser
+appuser@36a6668d33a8:/app$ ls -la /app
+drwxr-xr-x 1 appuser appuser  .idea
+-rwxr-xr-x 1 appuser appuser  app.py
+-rwxr-xr-x 1 appuser appuser  requirements.txt</code></pre>
+      Every file owned by <code>appuser</code>, not <code>root</code> — proof the
+      <code>chown -R appuser:appuser /app</code> line actually worked.
+    </div>
+
+    <h2>.dockerignore</h2>
+    <pre><code>__pycache__/
+*.pyc
+*.pyo
+.env
+.git/
+.gitignore
+*.log
+Dockerfile
+.dockerignore
+.idea/</code></pre>
+    <p>
+      Small habit worth building: after every build, glance inside the running
+      container (<code>ls -la /app</code>) and ask "does anything here look like it
+      shouldn't ship?" — IDE folders, <code>.env</code> secrets, and test files sneak
+      into images constantly if this file isn't maintained.
+    </p>
+
+    <h2>0.0.0.0 vs. 127.0.0.1</h2>
+    <p>
+      Flask defaults to binding on <code>127.0.0.1</code> — accessible only from
+      <em>inside</em> the container itself. Using <code>host='0.0.0.0'</code> means
+      "listen on all network interfaces," which is what makes the app reachable from
+      outside the container through the <code>-p</code> port mapping. Always use this in Docker.
+    </p>
+
+    <h2>Complete professional Dockerfile</h2>
+    <pre><code># Pin exact version - reproducibility
+FROM python:3.11.4-slim
+
+LABEL maintainer="anshul@example.com"
+LABEL version="1.0"
+
+ARG APP_ENV=production
+
+ENV APP_ENV=${APP_ENV} \
+    PORT=5000 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN useradd --create-home appuser && \
+    chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 5000
+
+CMD ["python", "app.py"]</code></pre>
+    <p>
+      <code>PYTHONDONTWRITEBYTECODE=1</code> skips creating <code>.pyc</code> files
+      (cleaner image). <code>PYTHONUNBUFFERED=1</code> prints logs immediately instead
+      of buffering them — critical for actually seeing logs in real time via
+      <code>docker logs</code>.
+    </p>
+
+    <h2>Mini Project 1 — a real Flask API, built and debugged</h2>
+    <p>Three endpoints, proving ENV values genuinely flow from Dockerfile → container → Python code:</p>
+    <pre><code>from flask import Flask
+import sys
+import os
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Docker Learning API - Chapter 4"
+
+@app.route('/health')
+def health():
+    return {"status": "healthy", "version": "1.0"}
+
+@app.route('/info')
+def info():
+    return {
+        "python_version": sys.version,
+        "environment": os.environ.get('APP_ENV', 'development'),
+        "port": os.environ.get('PORT', '5000')
+    }
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=False)</code></pre>
+
+    <div class="callout bug">
+      <span class="callout-label">a Dockerfile bug caught by dry-run, before ever building</span>
+      A multi-line <code>ENV</code> continuation using a trailing backslash
+      accidentally started a new line by itself (<code>\PORT=5000</code>) — invalid
+      syntax. Several instructions (<code>RUN</code>, <code>COPY</code>,
+      <code>USER</code>, <code>EXPOSE</code>, <code>CMD</code>) also ended up
+      squashed onto a single line. A Dockerfile executes <strong>one instruction per
+      line</strong> — multiple instructions on one line get misread as arguments to
+      the first one. Fixed by giving each instruction its own line, and using proper
+      line continuation:
+      <pre><code>ENV APP_ENV=${APP_ENV} \
+    PORT=5000</code></pre>
+    </div>
+
+    <p>Final verified output, confirming the full ENV override chain works end-to-end:</p>
+    <pre><code>docker build -t docker-api:v1 .
+docker run -d -p 5000:5000 -e APP_ENV=staging --name api-test docker-api:v1
+
+curl http://localhost:5000/
+# Docker Learning API - Chapter 4
+
+curl http://localhost:5000/health
+# {"status":"healthy","version":"1.0"}
+
+curl http://localhost:5000/info
+# {
+#   "environment": "staging",
+#   "port": "5000",
+#   "python_version": "3.11.4 (main, Aug 16 2023, ...) [GCC 12.2.0]"
+# }</code></pre>
+    <p>
+      <code>"environment": "staging"</code> confirms the <code>-e APP_ENV=staging</code>
+      override beat the Dockerfile's <code>development</code> default — runtime always
+      wins over build-time. <code>"port": "5000"</code> confirms the Dockerfile's
+      <code>ENV PORT=5000</code> default was read correctly. The Python version string
+      is live proof this is genuinely running inside the container's own Python
+      3.11.4, not some Python on the host machine.
+    </p>
+
+  </div>
+
+  <div class="chapter-nav">
+    <a href="chapter3.html">
+      <span class="dir">← previous</span>
+      <span>03 · Images: The Blueprint</span>
+    </a>
+    <a href="chapter5.html" class="next">
+      <span class="dir">next →</span>
+      <span>05 · Volumes &amp; Persistent Storage</span>
+    </a>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  built while learning docker · served by nginx:alpine
+</footer>
+
+</body>
+</html>

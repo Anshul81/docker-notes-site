@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 3 · Images: The Blueprint — Docker Notes</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> docker-notes</div>
+  <div class="links">
+    <a href="index.html">chapters</a>
+    <a href="cheatsheet.html">cheat sheet</a>
+    <a href="https://github.com/" target="_blank" rel="noopener">github ↗</a>
+  </div>
+</nav>
+
+<div class="shell">
+
+  <div class="chapter-header" style="padding-top:48px;">
+    <div class="chapter-meta">chapter 03 / 07</div>
+    <h1>Images: The Blueprint</h1>
+  </div>
+
+  <div class="prose">
+
+    <h2>Why "Pulling from library/nginx" shows multiple lines</h2>
+    <p>
+      Pulling an image always prints several lines like <code>Pull complete</code>,
+      not just one. That's because an image is <strong>not a single file</strong> —
+      it's a stack of layers, and each one gets pulled separately.
+    </p>
+    <pre><code>Pulling from library/nginx
+2cc3ae149d28: Pull complete
+1018f2b8dba8: Pull complete
+b831e78d8e20: Pull complete</code></pre>
+
+    <h2>The layered filesystem — the core insight</h2>
+    <p>
+      Each layer represents a set of filesystem changes — files added, modified, or
+      deleted. Every layer is <strong>read-only</strong> and <strong>immutable</strong> —
+      once created, it never changes.
+    </p>
+    <pre><code>┌─────────────────────────────────┐
+│         nginx Image             │
+│  Layer 4: nginx config files    │  ← added last
+│  Layer 3: nginx binary          │
+│  Layer 2: system libraries      │
+│  Layer 1: base Ubuntu/Debian    │  ← added first
+└─────────────────────────────────┘</code></pre>
+    <p>
+      When Docker runs a container from an image, it adds one more layer on top — a
+      thin <strong>writable layer</strong>, unique to that container:
+    </p>
+    <pre><code>┌─────────────────────────────────┐
+│  Container Writable Layer   R/W │  ← your container's changes
+├─────────────────────────────────┤
+│  Layer 4: nginx config      R/O │  ← image layers
+│  Layer 3: nginx binary      R/O │     (read only)
+│  Layer 2: system libraries  R/O │
+│  Layer 1: base OS           R/O │
+└─────────────────────────────────┘</code></pre>
+
+    <h2>Union filesystem — the magic that makes it work</h2>
+    <p>
+      A union filesystem merges multiple layers into a single unified view. The
+      container sees one clean filesystem — not a visible stack — even though
+      underneath, those files are spread across several read-only layers plus one
+      writable layer on top.
+    </p>
+    <div class="callout">
+      <span class="callout-label">analogy</span>
+      Imagine four transparent glass sheets stacked on top of each other. Sheet 1 has
+      a sky painted on it, sheet 2 has mountains, sheet 3 has trees, sheet 4 has a
+      house. Looking through all of them together, you see one complete painting —
+      but each sheet remains independent and unchanged.
+    </div>
+
+    <h2>Copy-on-write (CoW) — how containers modify files</h2>
+    <p>
+      Containers are supposed to be isolated — but what happens when a container
+      needs to modify a file that lives in a read-only image layer?
+    </p>
+    <div class="callout">
+      <span class="callout-label">the mechanism</span>
+      When a container wants to modify a file from a read-only layer, Docker first
+      <strong>copies</strong> that file up to the writable layer, then modifies the
+      copy. The original in the image layer is never touched.
+    </div>
+    <pre><code>Container wants to edit /etc/nginx/nginx.conf
+
+Step 1: File currently lives in Layer 4 (read-only)
+
+Step 2: Docker copies it up to writable layer
+        ┌─────────────────────────────────┐
+        │  Writable Layer                 │
+        │  /etc/nginx/nginx.conf (copy) ← │ modified here
+        ├─────────────────────────────────┤
+        │  Layer 4: nginx.conf (original) │ untouched
+        └─────────────────────────────────┘
+
+Step 3: Container sees the modified copy (top layer wins)
+Step 4: Other containers using same image still see original</code></pre>
+
+    <div class="callout">
+      <span class="callout-label">verified live</span>
+      Ran two separate <code>ubuntu</code> containers from the same image. Wrote
+      <code>/tmp/myfile.txt</code> inside the first one. Checked for it inside the
+      second — it wasn't there. The file only ever existed in the first container's
+      own writable layer:
+      <pre><code>cow-test container:                cow-test-2 container:
+┌─────────────────────┐            ┌─────────────────────┐
+│ Writable Layer      │            │ Writable Layer      │
+│ /tmp/myfile.txt ✅  │            │ (empty)             │
+├─────────────────────┤            ├─────────────────────┤
+│ Ubuntu image layer  │            │ Ubuntu image layer  │
+│ (shared, read-only) │            │ (shared, read-only) │
+└─────────────────────┘            └─────────────────────┘</code></pre>
+      This is exactly why five containers from the same image never interfere with
+      each other, and why they don't each need their own full copy of the image.
+    </div>
+
+    <h2>Why layers matter — the caching superpower</h2>
+    <p>
+      Imagine two apps that both start from Ubuntu, install the same system
+      libraries, and both run Python 3.11:
+    </p>
+    <pre><code>App A image:                App B image:
+┌────────────────┐          ┌────────────────┐
+│ App A code     │          │ App B code     │
+│ Python 3.11    │          │ Python 3.11    │
+│ system libs    │          │ system libs    │
+│ Ubuntu 22.04   │          │ Ubuntu 22.04   │
+└────────────────┘          └────────────────┘</code></pre>
+    <p>
+      Without layer sharing, that duplicated data gets stored twice. With layers,
+      Docker recognizes identical layers and stores each one only <strong>once</strong>,
+      shared across every image that uses it:
+    </p>
+    <pre><code>Disk storage:
+  Ubuntu 22.04 layer      ← stored ONCE, shared by both
+  system libs layer        ← stored ONCE, shared by both
+  Python 3.11 layer        ← stored ONCE, shared by both
+  App A code layer         ← unique to App A
+  App B code layer         ← unique to App B</code></pre>
+    <p>This is exactly why pulling a second Python image is faster than the first — many layers are already local.</p>
+
+    <h2>Seeing layers with your own eyes</h2>
+    <pre><code>docker history nginx:latest</code></pre>
+    <pre><code>IMAGE          CREATED        CREATED BY                SIZE
+ec4ed8b5299e   2 weeks ago    CMD ["nginx" "-g" "dae…   0B
+&lt;missing&gt;      2 weeks ago    EXPOSE map[80/tcp:{}]      0B
+&lt;missing&gt;      2 weeks ago    COPY /etc/nginx/nginx.c…  4.61kB
+&lt;missing&gt;      2 weeks ago    RUN /bin/sh -c set -x …   63.6MB
+&lt;missing&gt;      2 weeks ago    ENV PKG_RELEASE=1~bookw…   0B
+&lt;missing&gt;      2 weeks ago    RUN /bin/sh -c groupadd…  7.38MB
+&lt;missing&gt;      2 weeks ago    ADD file:a7912e2b58c6b5e…  74.8MB</code></pre>
+    <p>
+      Read bottom to top — that's build order. Notice the <code>SIZE</code> column:
+      most layers add real data, but some add <code>0B</code> because they're just
+      metadata (setting an environment variable, documenting a port).
+    </p>
+
+    <h2>Image tags — versions and pointers, not copies</h2>
+    <pre><code>nginx:latest        → most recent stable build
+nginx:1.25          → specific version
+nginx:1.25-alpine   → version 1.25 on Alpine Linux (tiny)
+python:3.11         → Python 3.11, full Debian image (~900MB)
+python:3.11-slim    → Python 3.11, minimal Debian (~150MB)
+python:3.11-alpine  → Python 3.11, Alpine Linux (~50MB)</code></pre>
+
+    <div class="callout bug">
+      <span class="callout-label">the :latest trap</span>
+      <code>:latest</code> does not mean "automatically updates." It just means
+      "whatever was tagged latest at the moment you pulled." Pull today, get Python
+      3.12. Pull again in 6 months, get 3.13 — with zero code changes on your end,
+      your app can quietly break. In production, always pin exact versions:
+      <code>python:3.11.4-slim</code>, never <code>python:latest</code>.
+    </div>
+
+    <h2>Tagging and pushing your own image</h2>
+    <pre><code>docker login
+
+docker tag hello-world:latest anshul/my-first-image:v1.0
+
+docker images
+# REPOSITORY                    TAG     IMAGE ID
+# hello-world                   latest  96498ffd522e
+# anshul/my-first-image         v1.0    96498ffd522e  ← same ID!
+
+docker push anshul/my-first-image:v1.0
+
+docker rmi anshul/my-first-image:v1.0    # delete local copy
+docker pull anshul/my-first-image:v1.0   # pull it back from the internet</code></pre>
+    <div class="callout">
+      <span class="callout-label">what this proves</span>
+      Same Image ID, two different tag names — tagging never copies data, it just
+      creates a new label pointing at the same underlying image, like a shortcut.
+      This full round-trip — build locally, push to a registry, pull elsewhere — is
+      exactly how real deployment works: CI/CD builds and pushes, your server pulls.
+    </div>
+
+    <h2>docker inspect — X-ray vision</h2>
+    <pre><code>docker inspect inspect-test --format "{{.NetworkSettings.IPAddress}}"
+docker inspect inspect-test --format "{{.Config.Image}}"
+docker inspect inspect-test --format "{{.Created}}"
+docker inspect inspect-test --format "{{.Config.Env}}"
+docker inspect nginx:latest    # full layer/config detail on an image</code></pre>
+
+    <h2>Housekeeping — docker system commands</h2>
+    <pre><code>docker system df           # how much disk Docker is using
+docker system prune        # remove unused containers/images/networks
+docker system prune -a     # more aggressive — also unused images
+docker container prune     # only stopped containers
+docker image prune         # only unused images</code></pre>
+    <div class="callout bug">
+      <span class="callout-label">when NOT to run prune -a</span>
+      It's not always safe to run anytime. If you have images you haven't used
+      recently but still need, <code>prune -a</code> deletes them — you'd have to
+      re-pull or rebuild. Fine on a personal dev machine, risky on a shared or CI server.
+    </div>
+
+    <h2>Base image sizes — measured, not assumed</h2>
+    <table>
+      <tr><th>Image</th><th>Size</th></tr>
+      <tr><td><code>python:3.11</code></td><td>1.6 GB</td></tr>
+      <tr><td><code>python:3.11-slim</code></td><td>188 MB</td></tr>
+      <tr><td><code>python:3.11-alpine</code></td><td>84 MB</td></tr>
+    </table>
+    <p>A 19x difference between full and Alpine. At scale that compounds fast:</p>
+    <pre><code>100 deployments/day × 1.6GB = 160GB bandwidth daily
+100 deployments/day × 84MB  =   8.4GB bandwidth daily</code></pre>
+
+    <h3>Alpine — why you'll see it everywhere</h3>
+    <pre><code>Base OS size comparison:
+Ubuntu 22.04    ~80MB
+Debian          ~50MB
+Alpine          ~5MB</code></pre>
+    <p>
+      Alpine is dramatically smaller — faster downloads, less disk, smaller attack
+      surface, faster CI/CD. The trade-off: Alpine uses <code>musl libc</code> instead
+      of <code>glibc</code>, so some Python packages with C extensions don't compile
+      cleanly without extra steps. <code>slim</code> (minimal Debian) is usually the
+      safer middle ground for Python — most of the size win, none of the compatibility risk.
+    </p>
+    <pre><code>For most Python apps:    python:3.11-slim   ✅
+For Node.js apps:        node:18-alpine     ✅
+For simple tools:        alpine             ✅
+For maximum compat:      python:3.11        (only if genuinely needed)</code></pre>
+
+    <h2>The complete image pull process, internally</h2>
+    <pre><code>docker pull python:3.11-slim
+         │
+         ▼
+CLI sends request to Daemon
+         │
+         ▼
+Daemon contacts Docker Hub
+GET https://registry-1.docker.io/v2/library/python/manifests/3.11-slim
+         │
+         ▼
+Hub returns image manifest (list of layers + checksums)
+         │
+         ▼
+Daemon checks each layer locally:
+"Do I already have sha256:abc123?" → YES → skip
+"Do I already have sha256:def456?" → NO  → download
+         │
+         ▼
+Only missing layers are downloaded
+(this is why second pulls are faster)
+         │
+         ▼
+Layers stored in Docker's layer cache
+Image assembled from layers, available locally</code></pre>
+
+  </div>
+
+  <div class="chapter-nav">
+    <a href="chapter2.html">
+      <span class="dir">← previous</span>
+      <span>02 · Architecture &amp; Core Concepts</span>
+    </a>
+    <a href="chapter4.html" class="next">
+      <span class="dir">next →</span>
+      <span>04 · Dockerfiles</span>
+    </a>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  built while learning docker · served by nginx:alpine
+</footer>
+
+</body>
+</html>

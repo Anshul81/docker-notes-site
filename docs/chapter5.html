@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 5 · Volumes &amp; Persistent Storage — Docker Notes</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> docker-notes</div>
+  <div class="links">
+    <a href="index.html">chapters</a>
+    <a href="cheatsheet.html">cheat sheet</a>
+    <a href="https://github.com/" target="_blank" rel="noopener">github ↗</a>
+  </div>
+</nav>
+
+<div class="shell">
+
+  <div class="chapter-header" style="padding-top:48px;">
+    <div class="chapter-meta">chapter 05 / 07</div>
+    <h1>Volumes &amp; Persistent Storage</h1>
+  </div>
+
+  <div class="prose">
+
+    <h2>Containers forget everything</h2>
+    <p>Predicting the outcome of a real sequence, before running it:</p>
+    <pre><code>docker exec -it api-test bash
+echo "important data" &gt; /app/mynotes.txt
+exit
+
+docker stop api-test
+docker rm api-test
+
+docker run -d -p 5000:5000 --name api-test docker-api:v1
+docker exec -it api-test bash
+cat /app/mynotes.txt   # ?</code></pre>
+    <p>
+      The file is gone. <code>docker rm</code> doesn't just stop a container — it
+      deletes the entire writable layer. Anything written there (logs, uploads,
+      database rows) disappears permanently.
+    </p>
+    <pre><code>Container writable layer
+┌─────────────────────────────┐
+│ mynotes.txt  ← lives HERE   │  ← deleted when container is removed
+├─────────────────────────────┤
+│ Image layers (read-only)    │  ← untouched, reusable
+└─────────────────────────────┘</code></pre>
+    <p>
+      This is intentional, not a bug — Docker's design philosophy is that containers
+      should be disposable. Great for a stateless web server. Genuinely dangerous for
+      a database: if a teammate accidentally runs <code>docker rm -f
+      postgres-container</code> on a plain, volume-less setup, months of customer
+      data are gone forever — no recycle bin, no undo.
+    </p>
+
+    <h2>The solution — volumes</h2>
+    <div class="callout">
+      <span class="callout-label">analogy</span>
+      A container is a hotel room — checkout resets everything. A volume is a storage
+      locker outside the hotel — it survives no matter how many rooms (containers)
+      you check in and out of.
+    </div>
+    <pre><code>Without volume:                    With volume:
+
+Container                          Container
+┌───────────────┐                  ┌───────────────┐
+│ Writable Layer│                  │ Writable Layer│
+│ data.db  ←────┼─ dies with       │  (points to)  │
+└───────────────┘  container       └───────┬───────┘
+                                            │
+                                            ▼
+                                    ┌───────────────┐
+                                    │ Docker Volume │ ← lives on host,
+                                    │ data.db       │   survives container
+                                    └───────────────┘   removal</code></pre>
+
+    <h2>Three types of storage</h2>
+    <table>
+      <tr><th>Type</th><th>Location decided by</th><th>Best for</th></tr>
+      <tr><td>Named volume</td><td>Docker</td><td>Databases, persistent app state</td></tr>
+      <tr><td>Bind mount</td><td>You (exact host path)</td><td>Local dev, live code editing</td></tr>
+      <tr><td>tmpfs</td><td>RAM only</td><td>Short-lived secrets, never touches disk</td></tr>
+    </table>
+
+    <h2>Named volumes, proven directly</h2>
+    <pre><code>docker volume create mydata
+docker run -it -v mydata:/app/data --name vol-test ubuntu bash
+
+# inside:
+echo "This data should survive" &gt; /app/data/notes.txt
+cat /app/data/notes.txt
+exit
+
+docker rm vol-test    # container fully gone
+
+docker run -it -v mydata:/app/data --name vol-test-2 ubuntu bash
+# inside:
+cat /app/data/notes.txt   # still there</code></pre>
+    <p>
+      <code>vol-test</code> and <code>vol-test-2</code> are completely different
+      containers — different IDs, different writable layers — yet
+      <code>notes.txt</code> survives, because the volume never depended on either
+      container's existence. Breaking down the flag:
+    </p>
+    <pre><code>-v  mydata          :         /app/data
+     │                              │
+     │                              └─ path INSIDE the container
+     └─ volume name (Docker manages where this actually lives)</code></pre>
+
+    <h2>Listing and inspecting volumes</h2>
+    <pre><code>docker volume ls
+docker volume inspect mydata
+docker volume rm mydata
+docker volume prune          # remove all unused volumes</code></pre>
+    <pre><code>[
+    {
+        "Name": "mydata",
+        "Mountpoint": "/var/lib/docker/volumes/mydata/_data",
+        "Driver": "local"
+    }
+]</code></pre>
+    <p>
+      That <code>Mountpoint</code> is the real location inside the WSL2 Linux VM on
+      Windows — you rarely touch it directly, but knowing it exists helps when debugging.
+    </p>
+
+    <h2>Bind mounts — the other type</h2>
+    <p>
+      Named volumes suit databases where the exact physical location doesn't matter.
+      Bind mounts solve a different problem: actively editing code and wanting the
+      container to reflect every change instantly, without rebuilding.
+    </p>
+    <pre><code>docker run -d -v C:/Users/anshu/docker-learning/chapter4:/app -p 5000:5000 flask-app:v1</code></pre>
+    <pre><code>-v  C:/Users/anshu/.../chapter4  :  /app
+     │                                   │
+     │                                   └─ path inside container
+     └─ EXACT path on YOUR machine (you choose it, not Docker)</code></pre>
+
+    <table>
+      <tr><th></th><th>Named Volume</th><th>Bind Mount</th></tr>
+      <tr><td>Location</td><td>Docker decides</td><td>You decide (exact path)</td></tr>
+      <tr><td>Managed by</td><td>Docker</td><td>You, manually</td></tr>
+      <tr><td>Best for</td><td>Databases, persistent state</td><td>Local dev, live editing</td></tr>
+      <tr><td>Portability</td><td>Very portable</td><td>Tied to your machine's folder layout</td></tr>
+    </table>
+
+    <div class="callout">
+      <span class="callout-label">verified live</span>
+      Bind-mounted a Windows folder over a container's <code>/app</code>, edited
+      <code>app.py</code> on the host, and — without rebuilding — refreshed the
+      browser. The new text appeared immediately. A bind mount doesn't merge with
+      what's underneath in the image; it <strong>completely overlays</strong> that
+      path. Whatever was baked into the image at <code>/app</code> becomes invisible
+      the moment something else is mounted on top of the same path.
+    </div>
+
+    <div class="callout bug">
+      <span class="callout-label">the gotcha this creates</span>
+      If the image was built with <code>COPY . .</code> baking in a
+      <em>newer</em> <code>app.py</code>, but the bind-mounted host folder has an
+      <em>older</em> version — the older, host version wins, completely hiding the
+      newer one baked into the image. Also: <code>pip install</code> already ran
+      during <em>build</em>, before the mount ever existed. Adding a new package to
+      <code>requirements.txt</code> on the host and expecting it to "just work" via
+      the live mount doesn't — the mount only solves "my code changed," not "my
+      dependencies changed." A new dependency still requires a real rebuild.
+    </div>
+
+    <h2>Mini Project 2 — PostgreSQL with a persistent volume, and a real bug</h2>
+    <pre><code>docker volume create pgdata
+
+docker run -d \
+  --name my-postgres \
+  -e POSTGRES_PASSWORD=mysecretpassword \
+  -v pgdata:/var/lib/postgres/data \
+  -p 5432:5432 \
+  postgres:16</code></pre>
+    <p>Created a table, inserted a row, destroyed the container, recreated from the same volume, and checked:</p>
+    <pre><code>CREATE TABLE students (id SERIAL PRIMARY KEY, name TEXT);
+INSERT INTO students (name) VALUES ('Anshul');
+SELECT * FROM students;
+-- destroy, recreate container...
+SELECT * FROM students;
+-- ERROR:  relation "students" does not exist</code></pre>
+
+    <div class="callout bug">
+      <span class="callout-label">the actual bug: a one-character path typo</span>
+      Debugged systematically rather than guessing — checked <code>docker volume
+      ls</code>, <code>docker volume inspect pgdata</code>, and critically
+      <code>docker inspect &lt;container&gt; --format "{{.Mounts}}"</code>, which
+      revealed <strong>two</strong> mount entries instead of one:
+      <pre><code>Mount 1:  volume pgdata     →  /var/lib/postgres/data      ← what was typed
+Mount 2:  volume e6ba24...  →  /var/lib/postgresql/data    ← what Postgres actually uses</code></pre>
+      <code>/var/lib/postgres/data</code> (typed) vs.
+      <code>/var/lib/postgresql/data</code> (real Postgres data path — note the
+      extra "ql"). Docker didn't error — it has no idea what path any given
+      application expects internally. It simply mounted <code>pgdata</code> to the
+      exact (wrong) path given, and since PostgreSQL's <em>real</em> data path had no
+      volume attached, Docker silently created an <strong>anonymous volume</strong>
+      there instead. The <code>students</code> table was written into that anonymous
+      volume the whole time — not into <code>pgdata</code>.
+    </div>
+
+    <div class="callout">
+      <span class="callout-label">the fix, and the habit it created</span>
+      <pre><code>docker stop my-postgres-2 &amp;&amp; docker rm my-postgres-2
+docker volume rm pgdata &amp;&amp; docker volume prune
+docker volume create pgdata
+
+docker run -d --name my-postgres \
+  -e POSTGRES_PASSWORD=mysecretpassword \
+  -v pgdata:/var/lib/postgresql/data \
+  -p 5432:5432 \
+  postgres:16
+
+# immediately verify BEFORE trusting it:
+docker inspect my-postgres --format "{{.Mounts}}"
+# → exactly one mount, correct path</code></pre>
+      New rule going forward: always verify a mount immediately with
+      <code>docker inspect</code> before trusting it, and always get exact internal
+      data paths from the image's official Docker Hub documentation — never type
+      them from memory.
+    </div>
+
+    <h2>Common data paths (from official images — never guess these)</h2>
+    <pre><code>postgres   →  /var/lib/postgresql/data
+mysql      →  /var/lib/mysql
+mongodb    →  /data/db
+redis      →  /data</code></pre>
+    <p>
+      No consistent pattern across images — each application decides its own
+      internal path. Volume mounting isn't "Docker decides where data goes" — it's
+      "you tell Docker where to put persistent storage, and the application decides
+      where it actually writes files. Your job is making those two locations match."
+    </p>
+
+    <h2>Backing up a named volume's data</h2>
+    <pre><code>docker run --rm -v pgdata:/data -v C:/backup:/backup ubuntu \
+  tar czf /backup/pgdata-backup.tar.gz /data</code></pre>
+    <p>
+      A throwaway container mounts both the named volume and a host folder just to
+      copy data between them — the database itself stays on the named volume
+      permanently; you don't switch it to a bind mount just to peek at files.
+    </p>
+
+    <div class="callout">
+      <span class="callout-label">one more concept, confirmed by reasoning</span>
+      Could two containers (<code>my-postgres</code> and <code>my-postgres-2</code>)
+      use the same <code>pgdata</code> volume <em>simultaneously</em>? No — PostgreSQL
+      locks its data directory on startup. Only one process should write to those
+      files at once, or you'd risk data corruption from two independent instances
+      writing conflicting changes to the same files. Real production systems solve
+      "I need multiple instances" with database replication, or by pointing multiple
+      app services at one shared database container over the network — which leads
+      directly into Chapter 6.
+    </div>
+
+  </div>
+
+  <div class="chapter-nav">
+    <a href="chapter4.html">
+      <span class="dir">← previous</span>
+      <span>04 · Dockerfiles</span>
+    </a>
+    <a href="chapter6.html" class="next">
+      <span class="dir">next →</span>
+      <span>06 · Networking</span>
+    </a>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  built while learning docker · served by nginx:alpine
+</footer>
+
+</body>
+</html>

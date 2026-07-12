@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 1 · Why Docker Exists — Docker Notes</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> docker-notes</div>
+  <div class="links">
+    <a href="index.html">chapters</a>
+    <a href="cheatsheet.html">cheat sheet</a>
+    <a href="https://github.com/" target="_blank" rel="noopener">github ↗</a>
+  </div>
+</nav>
+
+<div class="shell">
+
+  <div class="chapter-header" style="padding-top:48px;">
+    <div class="chapter-meta">chapter 01 / 07</div>
+    <h1>Why Docker Exists</h1>
+  </div>
+
+  <div class="prose">
+
+    <h2>The "it works on my machine" crisis</h2>
+    <p>
+      Imagine spending two weeks building a Python web app. It works perfectly on
+      your laptop. You send the code to a teammate. They run it. It crashes. You look
+      at the error together and say the four most dreaded words in software
+      development: <em>"it works on my machine."</em>
+    </p>
+    <p>
+      This isn't a rare edge case — before Docker, it was the norm. The code was
+      identical. The <strong>environment</strong> was different: your laptop had
+      Python 3.10, theirs had 3.7. You had <code>requests==2.28</code>, they had
+      <code>2.20</code>. You were on Windows, the server runs Linux. You had an
+      environment variable set that they didn't.
+    </p>
+
+    <h2>How people tried to solve this, historically</h2>
+
+    <h3>Era 1 — the manual README (1990s–2000s)</h3>
+    <pre><code>SETUP INSTRUCTIONS:
+1. Install Python 3.7 (NOT 3.8, it breaks)
+2. Install these 14 libraries (exact versions listed)
+3. Set these 6 environment variables
+4. Make sure your OS locale is set to UTF-8
+5. Pray</code></pre>
+    <p>
+      Setup took hours. One wrong step meant a broken environment. Onboarding a new
+      teammate could eat an entire day.
+    </p>
+
+    <h3>Era 2 — Virtual Machines (2000s–2010s)</h3>
+    <p>
+      The next idea: ship the entire computer. A VM is a software-simulated computer
+      running inside your real one — package the full OS plus your app, and everyone
+      runs an identical environment.
+    </p>
+    <pre><code>Your Physical Machine (Host)
+┌─────────────────────────────────────┐
+│  ┌─────────────┐  ┌─────────────┐  │
+│  │    VM 1     │  │    VM 2     │  │
+│  │  ┌───────┐  │  │  ┌───────┐  │  │
+│  │  │  App  │  │  │  │  App  │  │  │
+│  │  ├───────┤  │  │  ├───────┤  │  │
+│  │  │  OS   │  │  │  │  OS   │  │  │
+│  │  │(Linux)│  │  │  │(Linux)│  │  │
+│  │  └───────┘  │  │  └───────┘  │  │
+│  └─────────────┘  └─────────────┘  │
+│         Hypervisor (VMware etc.)    │
+│         Host OS (Windows)           │
+│         Physical Hardware           │
+└─────────────────────────────────────┘</code></pre>
+    <p>This genuinely worked — but at a real cost:</p>
+    <ul>
+      <li>A single VM is typically <strong>5–20 GB</strong></li>
+      <li>Booting takes <strong>2–5 minutes</strong></li>
+      <li>Running 10 services means 10 full VMs — your machine grinds to a halt</li>
+      <li>Each VM carries a full OS even if the app itself is only 10MB</li>
+      <li>Hardware resources are reserved upfront, whether the app needs them right now or not</li>
+    </ul>
+
+    <h3>Era 3 — Containers (2013, the Docker revolution)</h3>
+    <p>The key insight that changes everything:</p>
+    <div class="callout">
+      <span class="callout-label">core insight</span>
+      All Linux systems already share the same core kernel. Apps just need their own
+      isolated space <em>on top of</em> that kernel — not a whole separate copy of the OS underneath them.
+    </div>
+    <pre><code>Instead of this (VMs):
+App + Full OS Copy + Full OS Copy + Full OS Copy
+
+Do this (Containers):
+App1  App2  App3     ← each isolated
+ │     │     │
+ └─────┴─────┘
+    Shared OS Kernel   ← one copy, used by all</code></pre>
+
+    <h2>The shipping container analogy</h2>
+    <p>
+      Docker's name isn't random. Before standardized shipping containers existed
+      (pre-1950s), loading cargo onto ships was chaos — every item was different.
+      Bananas needed special handling, machinery needed cranes, glass needed padding.
+      Every port had different equipment for different cargo.
+    </p>
+    <p>
+      In 1956, the standardized shipping container was invented. Same size, same
+      corners, same locking mechanism — every ship, every port, every truck could
+      handle it, regardless of what was <em>inside</em>.
+    </p>
+    <pre><code>Before containers:          After containers:
+┌──────────────────┐        ┌───┐ ┌───┐ ┌───┐
+│ bananas 🍌       │        │ 📦│ │ 📦│ │ 📦│
+│ machinery ⚙️     │  →     │   │ │   │ │   │
+│ glass 🫙         │        └───┘ └───┘ └───┘
+│ (custom handling)│        standard, stackable,
+└──────────────────┘        portable everywhere</code></pre>
+    <p>
+      Docker does the exact same thing for software. Your app, its dependencies, and
+      its config get packaged into a <strong>standard container</strong>. It runs
+      identically on your laptop, your colleague's machine, the test server, and
+      production.
+    </p>
+
+    <h2>What a container actually is</h2>
+    <div class="callout">
+      <span class="callout-label">mental model</span>
+      A container is an <strong>isolated process</strong> running on your machine
+      that thinks it's the only thing running on its own private computer.
+    </div>
+    <p>It has its own:</p>
+    <ul>
+      <li>Filesystem (can't see your files)</li>
+      <li>Network (has its own IP)</li>
+      <li>Process list (can't see other processes)</li>
+      <li>Resource limits (gets only the CPU/RAM assigned to it)</li>
+    </ul>
+    <p>
+      But it <strong>shares the host OS kernel</strong> — that's the entire reason it's
+      lightweight. Containers start in milliseconds, not minutes, and measure in
+      megabytes, not gigabytes.
+    </p>
+    <pre><code>Your Machine
+┌─────────────────────────────────────────┐
+│  ┌──────────┐  ┌──────────┐            │
+│  │Container1│  │Container2│            │
+│  │ Flask    │  │ Postgres │            │
+│  │ app      │  │ database │            │
+│  │(isolated)│  │(isolated)│            │
+│  └──────────┘  └──────────┘            │
+│         Docker Engine                   │
+│         Host OS Kernel (shared)         │
+│         Your Windows/Linux Hardware     │
+└─────────────────────────────────────────┘</code></pre>
+
+    <h2>VM vs. Container — side by side</h2>
+    <table>
+      <tr><th></th><th>VM</th><th>Container</th></tr>
+      <tr><td>Size</td><td>5–20 GB</td><td>50–500 MB</td></tr>
+      <tr><td>Boot time</td><td>2–5 minutes</td><td>&lt; 1 second</td></tr>
+      <tr><td>OS</td><td>Full OS per VM</td><td>Shared kernel</td></tr>
+      <tr><td>Isolation</td><td>Hardware-level</td><td>Process-level (namespaces)</td></tr>
+      <tr><td>Performance</td><td>Heavy overhead</td><td>Near-native speed</td></tr>
+      <tr><td>Use case</td><td>Run different OSes</td><td>Run same-OS apps</td></tr>
+    </table>
+
+    <h2>Why Docker specifically?</h2>
+    <p>
+      Linux containers as a raw technology existed before Docker — but using them
+      required deep kernel expertise. Docker made it simple with a standard image
+      format, a straightforward CLI (<code>docker run</code>, <code>docker build</code>),
+      a public registry to share images (Docker Hub), and later a standard way to
+      describe multi-container infrastructure (Compose). Docker didn't invent
+      containers — it <strong>democratized</strong> them.
+    </p>
+
+    <h2>Real industry usage</h2>
+    <ul>
+      <li><strong>Netflix</strong> runs thousands of microservices in containers — recommendations, billing, search, each isolated.</li>
+      <li><strong>CI/CD pipelines</strong> (like GitHub Actions) run your tests inside a fresh container every single time.</li>
+      <li><strong>ML engineers</strong> package a model + Python + CUDA dependencies into one container and share it with anyone.</li>
+      <li><strong>You, after this course</strong> — shipping a Flask + PostgreSQL + Redis stack to any server with one command.</li>
+    </ul>
+
+    <h2>Installing on Windows — why WSL2 matters</h2>
+    <p>
+      Docker containers are fundamentally Linux technology. They depend on two Linux
+      kernel features:
+    </p>
+    <ul>
+      <li><strong>Namespaces</strong> — isolation (a container thinks it's alone)</li>
+      <li><strong>Cgroups</strong> — resource limits (CPU/RAM per container)</li>
+    </ul>
+    <p>
+      Neither exists in the Windows kernel. So on Windows, something has to provide a
+      real Linux kernel underneath. Docker Desktop uses <strong>WSL2</strong> — a
+      lightweight Linux VM built into Windows — to do this transparently. You never
+      see or manage it directly; your containers actually run inside it.
+    </p>
+    <pre><code>Your Windows Machine
+┌──────────────────────────────────────┐
+│   Docker Desktop (UI + CLI)          │
+│          │                           │
+│          ▼                           │
+│   WSL2 (hidden Linux VM)             │
+│   ┌──────────────────────┐           │
+│   │  Docker Engine       │           │
+│   │  ┌─────┐  ┌─────┐   │           │
+│   │  │ C1  │  │ C2  │   │           │
+│   │  └─────┘  └─────┘   │           │
+│   └──────────────────────┘           │
+└──────────────────────────────────────┘</code></pre>
+
+    <div class="callout bug">
+      <span class="callout-label">what if you skip WSL2?</span>
+      Docker Desktop falls back to <strong>Hyper-V</strong> — which requires Windows
+      Pro/Enterprise/Education. On Windows Home, Hyper-V isn't available at all, so
+      Docker simply won't run. Even on Pro, Hyper-V is slower and heavier on RAM than
+      WSL2. There's effectively no good reason to skip it — and WSL2 is genuinely
+      useful beyond Docker too (a real Linux terminal on Windows, native Linux tooling).
+    </div>
+
+    <pre><code># Enable WSL2 (PowerShell, as Administrator)
+wsl --install
+
+# Restart when prompted, then verify:
+wsl --list --verbose
+#   NAME      STATE           VERSION
+# * Ubuntu    Running         2        ← the "2" is what matters
+
+# Then install Docker Desktop from docker.com,
+# keeping "Use WSL2 instead of Hyper-V" checked during setup.
+
+# Verify Docker itself:
+docker --version
+docker run hello-world</code></pre>
+
+    <h2>Tracing your first command: docker run hello-world</h2>
+    <pre><code>You typed: docker run hello-world
+                │
+                ▼
+        Docker CLI receives command
+                │
+                ▼
+        Asks Docker Engine:
+        "Do I have 'hello-world' image locally?"
+                │
+                ▼
+              NO
+                │
+                ▼
+        Contacts Docker Hub (the internet)
+        Pulls the 'hello-world' image
+                │
+                ▼
+        Creates a container from that image
+                │
+                ▼
+        Container runs, prints the message
+                │
+                ▼
+        Container exits (job done)</code></pre>
+    <p>
+      One command pulled an image from the internet, created a container, ran it,
+      and let it exit — the core loop you'll use for the rest of your career.
+    </p>
+
+    <h2>Image vs. container — proven with real commands</h2>
+    <p>
+      Running <code>docker run</code> pulls an <strong>image</strong> (the blueprint)
+      and creates a <strong>container</strong> (a running instance of it). Removing a
+      container never removes the image — only the instance disappears.
+    </p>
+    <pre><code>docker run -d -p 8080:80 --name my-nginx nginx
+docker stop my-nginx
+docker rm my-nginx
+
+docker images   # nginx is still here — the blueprint survives
+docker ps -a    # container is gone — the instance does not</code></pre>
+    <p>
+      Real terminal evidence from this exact test:
+    </p>
+    <pre><code>CONTAINER ID   IMAGE         STATUS                        NAMES
+0ab4cf6d5bc4   nginx         Exited (137) 32 seconds ago   nostalgic_carver
+4c69dd85f64e   hello-world   Exited (0) 4 minutes ago      inspiring_germain</code></pre>
+
+    <div class="callout">
+      <span class="callout-label">reading exit codes</span>
+      <code>Exited (0)</code> means the process finished on its own, successfully —
+      that's <code>hello-world</code>, which just prints a message and ends.
+      <code>Exited (137)</code> means the process was killed by an external signal —
+      that's nginx, stopped deliberately via <code>docker stop</code>. This distinction
+      becomes a genuine debugging clue later: when a container crashes unexpectedly,
+      the exit code is often the first thing worth checking.
+    </div>
+
+    <p>
+      Also worth noticing: Docker auto-generated the names <code>nostalgic_carver</code>
+      and <code>inspiring_germain</code> because none were specified. In real projects
+      you'll always name containers explicitly with <code>--name</code> — it makes
+      logs, debugging, and networking (Chapter 6) far easier to reason about.
+    </p>
+
+  </div>
+
+  <div class="chapter-nav">
+    <a href="index.html">
+      <span class="dir">← back to</span>
+      <span>all chapters</span>
+    </a>
+    <a href="chapter2.html" class="next">
+      <span class="dir">next →</span>
+      <span>02 · Architecture &amp; Core Concepts</span>
+    </a>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  built while learning docker · served by nginx:alpine
+</footer>
+
+</body>
+</html>
