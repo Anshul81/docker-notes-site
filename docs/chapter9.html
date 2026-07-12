@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 9 · Debugging, Logging &amp; Troubleshooting — Docker Notes</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> docker-notes</div>
+  <div class="links">
+    <a href="index.html">chapters</a>
+    <a href="cheatsheet.html">cheat sheet</a>
+    <a href="https://github.com/" target="_blank" rel="noopener">github ↗</a>
+  </div>
+</nav>
+
+<div class="shell">
+
+  <div class="chapter-header" style="padding-top:48px;">
+    <div class="chapter-meta">chapter 09 / 10</div>
+    <h1>Debugging, Logging &amp; Troubleshooting</h1>
+  </div>
+
+  <div class="prose">
+
+    <h2>The debugging mindset — formalizing what already worked</h2>
+    <p>
+      Chapters 5, 6, and 7 each involved real bugs (a volume path typo, a "students
+      table missing" mystery, a stale image cache) — and in every case, the first
+      move was the same: <code>docker logs</code>. This chapter turns that instinct
+      into a repeatable, deliberate method.
+    </p>
+    <div class="callout">
+      <span class="callout-label">why logs come first, always</span>
+      The outside world only ever sees the symptom — a browser showing "Internal
+      Server Error" is generic and unhelpful. The container's own logs contain the
+      actual cause: the exact traceback, the exact line, the exact exception.
+    </div>
+
+    <h2>The systematic debugging ladder</h2>
+    <pre><code>1. docker ps -a
+   → Is the container even running? What's its exit code?
+
+2. docker logs &lt;container&gt;
+   → What does the application itself say went wrong?
+
+3. docker inspect &lt;container&gt;
+   → Mounts correct? Environment variables set as expected?
+     Network attached correctly?
+
+4. docker exec -it &lt;container&gt; bash
+   → Get inside. Check files exist. Check permissions.
+     Try running the failing command manually.
+
+5. docker stats
+   → Is it a resource problem? Maxed CPU/memory?</code></pre>
+    <p>Every one of these tools was already used organically in earlier chapters — this is about recognizing them as a deliberate ladder, not separate unrelated tricks.</p>
+
+    <h2>Exit codes — a real reference</h2>
+    <table>
+      <tr><th>Code</th><th>Meaning</th></tr>
+      <tr><td>0</td><td>Success — process finished normally</td></tr>
+      <tr><td>1</td><td>General application error (unhandled exception, etc.)</td></tr>
+      <tr><td>2</td><td>Tool-specific error (e.g. Python's own "bad file/argument" convention)</td></tr>
+      <tr><td>126</td><td>Command found but not executable (permissions issue)</td></tr>
+      <tr><td>127</td><td>Command not found (typo in CMD, or tool not installed)</td></tr>
+      <tr><td>137</td><td>SIGKILL (128+9) — killed forcibly, e.g. docker stop, or OOM kill</td></tr>
+      <tr><td>143</td><td>SIGTERM (128+15) — graceful stop signal received</td></tr>
+    </table>
+
+    <div class="callout">
+      <span class="callout-label">build-time vs. runtime failure</span>
+      A genuinely malformed Dockerfile (like Chapter 4's squashed multi-instruction
+      line) fails at <code>docker build</code> time — you never even get an exit
+      code, because the image never finishes building. Exit code 127 is different: it
+      means the container started successfully, and the command Docker tried to run
+      inside it simply doesn't exist there. Different failure stages entirely —
+      recognizing which one you're in immediately narrows down where to look.
+    </div>
+
+    <h2>Debugging exercise — broken Dockerfile #1</h2>
+    <pre><code>FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
+CMD ["python", "main.py"]   # actual file is named app.py</code></pre>
+    <div class="callout bug">
+      <span class="callout-label">the subtle distinction: 127 vs. 2</span>
+      This is <strong>not</strong> exit 127. <code>python</code> itself exists in the
+      image — it's found and runs successfully. It's <code>main.py</code> that
+      doesn't exist, and Python itself reports that error, not the shell.
+      <pre><code>docker run myapp
+# python3: can't open file '/app/main.py': [Errno 2] No such file or directory
+
+docker ps -a
+# STATUS: Exited (2)</code></pre>
+      Exit code <code>2</code> here is Python's own convention for "I ran, but hit an
+      error with my arguments/file" — a different category from "command not found."
+      Different tools have their own exit code conventions beyond the universal ones
+      — the code narrows the category, but <code>docker logs</code> still tells you
+      the specific fact.
+    </div>
+
+    <h2>Debugging exercise — broken Dockerfile #2 (the silent one)</h2>
+    <pre><code>FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
+EXPOSE 5000
+CMD ["python", "app.py"]</code></pre>
+    <p>
+      Builds fine. <code>docker run -d -p 5000:5000 myapp</code> shows
+      <code>Up 3 seconds</code> — genuinely running, no crash. But
+      <code>http://localhost:5000</code> gives <code>ERR_CONNECTION_REFUSED</code> —
+      the browser can't even reach it.
+    </p>
+    <div class="callout bug">
+      <span class="callout-label">a bug with zero error output, anywhere</span>
+      Cause: <code>app.py</code> still has <code>app.run(host='127.0.0.1', ...)</code>
+      instead of <code>0.0.0.0</code>. Flask binds correctly and listens — but only
+      to itself. From outside the container (via <code>-p</code>), that's a refused
+      connection.
+      <pre><code>docker logs myapp
+# * Running on http://127.0.0.1:5000
+# (no errors — Flask genuinely believes everything is fine)</code></pre>
+      This is a category of bug that produces <strong>zero</strong> error output
+      anywhere, which makes it harder to debug than a crash — the standard "check
+      docker logs" instinct comes up completely empty. The next diagnostic step is
+      <code>docker exec</code>, verifying directly from inside:
+      <pre><code>docker exec -it myapp bash
+curl http://127.0.0.1:5000   # works — proves Flask IS running,
+                              # just only reachable from inside</code></pre>
+      Confirming it works from inside but not outside narrows the cause specifically
+      to a binding issue, not a crash or missing dependency.
+    </div>
+    <div class="callout">
+      <span class="callout-label">the real lesson</span>
+      Not every bug produces an error. Sometimes the application is working exactly
+      as coded — the code itself is just wrong in a way that only shows up as
+      silence. When logs are clean but something's still broken, verify behavior
+      directly from inside the container rather than continuing to stare at logs
+      that were never going to show anything.
+    </div>
+
+    <h2>Logging — how docker logs actually works</h2>
+    <pre><code>docker logs &lt;container&gt;              # full log history, printed once
+docker logs -f &lt;container&gt;           # follow mode — live streaming
+docker logs --tail 50 &lt;container&gt;    # only the last 50 lines
+docker logs --since 10m &lt;container&gt;  # only logs from the last 10 minutes
+docker logs -t &lt;container&gt;           # add timestamps to each line</code></pre>
+    <p>
+      For a container running for days where something broke minutes ago,
+      <code>--since 10m</code> cuts straight to the relevant window instead of
+      dumping days of irrelevant noise.
+    </p>
+
+    <div class="callout">
+      <span class="callout-label">where logs actually come from</span>
+      Docker doesn't read your source code. It captures whatever a container's main
+      process writes to <strong>stdout</strong> and <strong>stderr</strong> — the same
+      two universal output streams every Linux process has always had. This is why
+      <code>docker logs</code> works identically for Python, Node.js, Nginx, or
+      anything else — it doesn't care what language or framework is involved, only
+      that output goes to those two streams.
+    </div>
+
+    <h3>Why PYTHONUNBUFFERED=1 actually mattered (Chapter 4, revisited)</h3>
+    <p>
+      Python buffers output by default when not connected to an interactive
+      terminal — it collects <code>print()</code> statements in memory and only
+      flushes them in batches.
+    </p>
+    <pre><code>Without PYTHONUNBUFFERED=1:
+  print("Processing request...")
+  → sits in a memory buffer, doesn't reach stdout immediately
+  → docker logs -f shows NOTHING, or shows it minutes late
+
+With PYTHONUNBUFFERED=1:
+  print("Processing request...")
+  → flushes to stdout immediately
+  → docker logs -f shows it in real time, as it happens</code></pre>
+    <div class="callout bug">
+      <span class="callout-label">why this is a nasty class of bug</span>
+      Without it, you could be watching <code>docker logs -f</code> live while a bug
+      is actively happening, and see nothing — not because logging is broken, but
+      because output is sitting in an unflushed buffer. It creates the illusion that
+      your primary debugging tool has stopped working, when really a single missing
+      environment variable is the cause.
+    </div>
+
+    <h2>Debugging a "silent" container — the full method combined</h2>
+    <pre><code>Symptom: Flask container shows "Up 10 minutes",
+         but the app is unresponsive. docker logs shows almost nothing.
+
+1. docker ps -a           → confirm it's still running, check exit code if not
+2. docker logs --since 5m → check recent activity specifically
+3. docker stats           → CPU pinned at 100%? Memory maxed?
+                             (a stuck infinite loop often shows as high CPU
+                              with zero new log output)
+4. docker exec -it &lt;container&gt; bash
+   → get inside, check if the process is actually responsive
+   → try curling the app FROM INSIDE its own container</code></pre>
+    <pre><code>docker stats
+CONTAINER   CPU %   MEM USAGE / LIMIT   MEM %
+flask-app   98.2%   340MiB / 512MiB     66.4%</code></pre>
+    <p>
+      High CPU with no corresponding log output is a strong signal of an infinite
+      loop or a stuck blocking call (e.g. a database connection attempt that hangs
+      forever waiting for a database that never responds) — a distinct failure
+      signature from a crash, and one <code>docker logs</code> alone wouldn't surface clearly.
+    </p>
+
+  </div>
+
+  <div class="chapter-nav">
+    <a href="chapter8.html">
+      <span class="dir">← previous</span>
+      <span>08 · Real-World Dockerization Patterns</span>
+    </a>
+    <a href="cheatsheet.html" class="next">
+      <span class="dir">next →</span>
+      <span>Command Cheat Sheet</span>
+    </a>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  built while learning docker · served by nginx:alpine
+</footer>
+
+</body>
+</html>

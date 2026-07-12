@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 8 · Real-World Dockerization Patterns — Docker Notes</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> docker-notes</div>
+  <div class="links">
+    <a href="index.html">chapters</a>
+    <a href="cheatsheet.html">cheat sheet</a>
+    <a href="https://github.com/" target="_blank" rel="noopener">github ↗</a>
+  </div>
+</nav>
+
+<div class="shell">
+
+  <div class="chapter-header" style="padding-top:48px;">
+    <div class="chapter-meta">chapter 08 / 10</div>
+    <h1>Real-World Dockerization Patterns</h1>
+  </div>
+
+  <div class="prose">
+
+    <h2>The gap between "build" and "run"</h2>
+    <p>
+      Every Dockerfile so far has been single-stage — one <code>FROM</code>, build
+      everything, ship it as-is. That works, but it means shipping build-time tools
+      into production even when the running app never needs them again.
+    </p>
+    <div class="callout">
+      <span class="callout-label">the core question</span>
+      Once an image is built, does the container still need <code>pip</code> itself —
+      or the build tools/caches pip created along the way — or does it only need the
+      <em>installed packages</em> and the app code? A carpenter's workshop full of
+      saws and glue isn't shipped inside the finished chair.
+    </div>
+
+    <h2>Where the waste is obvious — a Node/React example</h2>
+    <pre><code>FROM node:18
+WORKDIR /app
+COPY package.json .
+RUN npm install
+COPY . .
+RUN npm run build
+CMD ["npm", "start"]</code></pre>
+    <p>
+      <code>npm install</code> pulls in every dev dependency — build tools,
+      compilers, testing libraries. <code>npm run build</code> then produces a
+      handful of static HTML/CSS/JS files. The final running container doesn't need
+      Node.js, npm, or any dev dependency at all to serve static files.
+    </p>
+    <pre><code>node:18 base image alone:     ~1 GB
++ node_modules (dev deps):    +500 MB - 1 GB
++ your actual built output:   maybe 5-10 MB
+Final image: potentially 1.5-2 GB
+Actually needed at runtime:   ~10 MB of static files</code></pre>
+
+    <h2>Multi-stage builds — the fix</h2>
+    <p>
+      A multi-stage Dockerfile has more than one <code>FROM</code>. Earlier stages do
+      the heavy lifting; the final stage only copies over finished artifacts,
+      discarding everything else.
+    </p>
+    <pre><code># Stage 1: "builder" — has all the heavy tools
+FROM node:18 AS builder
+WORKDIR /app
+COPY package.json .
+RUN npm install
+COPY . .
+RUN npm run build
+
+# Stage 2: final image — lean, production-only
+FROM nginx:alpine
+COPY --from=builder /app/dist /usr/share/nginx/html
+EXPOSE 80</code></pre>
+    <p>
+      <code>AS builder</code> names the first stage. The second <code>FROM</code>
+      starts a completely separate image — none of Node's layers, none of
+      <code>node_modules</code>, carry over automatically.
+      <code>COPY --from=builder /app/dist ...</code> reaches back into the named
+      stage and copies out only the compiled output. Node, npm, and every dev
+      dependency stay trapped in the discarded <code>builder</code> stage — they
+      never become part of the final image's layers at all.
+    </p>
+    <pre><code>Single-stage:  Final image: ~1.5-2 GB (Node runtime + all dev deps + build output)
+Multi-stage:   Final image: ~25-40 MB (just nginx:alpine + your static files)</code></pre>
+    <p>Often a 40-50x size reduction — faster pulls, faster deploys, smaller attack surface.</p>
+
+    <h2>Does this help every project equally? No.</h2>
+    <table>
+      <tr><th>Project</th><th>Build tool ≠ runtime need?</th><th>Multi-stage benefit</th></tr>
+      <tr><td>Node/React static site</td><td>Yes — Node vs. plain HTML/CSS/JS</td><td>Huge (40-50x smaller)</td></tr>
+      <tr><td>Flask API (this course)</td><td>Barely — packages needed at runtime too</td><td>Small, only if a package needs a compiler</td></tr>
+      <tr><td>Static docs site (nginx:alpine)</td><td>No build step exists at all</td><td>None — nothing to separate into stages</td></tr>
+    </table>
+    <div class="callout">
+      <span class="callout-label">the real rule</span>
+      Multi-stage builds help exactly when a project's build-time footprint is
+      meaningfully bigger than its run-time footprint. No such gap, no real benefit —
+      just added complexity for nothing. Python doesn't "compile away" its
+      dependencies the way a frontend build does — <code>from flask import Flask</code>
+      needs the real <code>flask</code> package present every time the app starts, so
+      there's no separate "build artifact" distinct from "the thing that runs."
+    </div>
+    <p>Where multi-stage still helps Python: discarding compilers only needed to install certain packages.</p>
+    <pre><code>FROM python:3.11.4-slim AS builder
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+FROM python:3.11.4-slim
+WORKDIR /app
+COPY --from=builder /root/.local /root/.local
+COPY . .
+ENV PATH=/root/.local/bin:$PATH
+CMD ["python", "app.py"]</code></pre>
+
+    <h2>Dev vs. production Compose configs</h2>
+    <p>
+      A bind mount for live editing makes no sense on a production server — there's
+      no local source folder being actively edited there, and tying production
+      behavior to whatever happens to sit in a server folder defeats the point of a
+      self-contained image.
+    </p>
+    <table>
+      <tr><th>Development wants</th><th>Production wants</th></tr>
+      <tr><td>Bind mount (live edit)</td><td>Baked-in code (COPY . . in image)</td></tr>
+      <tr><td>Flask dev server (debug=True)</td><td>Real WSGI server, debug off</td></tr>
+      <tr><td>Exposed DB port (debugging)</td><td>DB port NOT exposed publicly</td></tr>
+    </table>
+
+    <h3>Compose file layering</h3>
+    <pre><code>docker-compose.yml           ← shared base: services, images, networks
+docker-compose.override.yml  ← dev-only additions (auto-applied by default!)
+docker-compose.prod.yml      ← prod-only additions (applied explicitly)</code></pre>
+    <pre><code># docker-compose.yml (base — identical in every environment)
+services:
+  flask-app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: mysecretpassword
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:</code></pre>
+    <pre><code># docker-compose.override.yml (dev — auto-merged, zero extra flags)
+services:
+  flask-app:
+    volumes:
+      - .:/app
+    ports:
+      - "5000:5000"
+    environment:
+      FLASK_DEBUG: "1"
+  postgres:
+    ports:
+      - "5432:5432"</code></pre>
+    <pre><code># docker-compose.prod.yml (prod — must be specified explicitly)
+services:
+  flask-app:
+    environment:
+      FLASK_DEBUG: "0"
+    restart: unless-stopped
+  postgres:
+    restart: unless-stopped</code></pre>
+    <pre><code>docker compose up
+# → dev: override.yml merges in automatically, zero extra flags needed
+
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# → prod: explicit -f flags required</code></pre>
+
+    <div class="callout">
+      <span class="callout-label">how merging actually works</span>
+      Overriding one setting doesn't wipe out the rest of that section — Compose
+      merges keys within a block. Base file's <code>DB_HOST</code> and prod
+      override's <code>FLASK_DEBUG</code> both survive into the final config. Verify
+      any merge before trusting it: <code>docker compose -f docker-compose.yml -f
+      docker-compose.prod.yml config</code> prints the complete merged YAML with
+      nothing actually started.
+    </div>
+
+    <div class="callout bug">
+      <span class="callout-label">why this must be structural, not memory-based</span>
+      If <code>docker-compose.override.yml</code> (dev settings — bind mount, exposed
+      DB port, debug mode) ever ends up sitting on a production server, plain
+      <code>docker compose up</code> merges it in automatically, silently — a
+      production database's port could end up publicly exposed, or the app could run
+      in debug mode (leaking stack traces to anyone who triggers an error), without
+      anyone explicitly asking for either. Relying on "always remember to type
+      <code>-f</code> flags in prod" is a human-memory dependency — exactly the kind
+      of failure point Docker's whole design philosophy tries to eliminate (same
+      lesson as the manual READMEs from Chapter 1). The safer fix: never deploy the
+      dev override file to the production server at all, so there's structurally
+      nothing for a plain <code>up</code> to merge in.
+    </div>
+
+    <h2>Health checks — beyond "is the process alive"</h2>
+    <p>
+      <code>docker ps</code>'s <code>STATUS</code> column only reflects whether a
+      container's main process is still alive — not whether the application inside
+      is actually responding correctly. A Flask worker can hang forever waiting on a
+      dead database connection while still showing <code>Up 2 hours</code>.
+    </p>
+    <pre><code>healthcheck:
+  test: ["CMD-SHELL", "pg_isready -U postgres"]
+  interval: 5s
+  timeout: 5s
+  retries: 5</code></pre>
+    <pre><code>test:      the actual command run to check health
+interval:  how often to run it
+timeout:   how long to wait before considering it failed
+retries:   how many consecutive failures before UNHEALTHY</code></pre>
+    <pre><code>docker ps
+# STATUS: Up 2 hours (healthy)
+# STATUS: Up 2 hours (unhealthy)
+# STATUS: Up 2 hours (health: starting)</code></pre>
+
+    <h3>Writing one for Flask itself</h3>
+    <pre><code>flask-app:
+  build: .
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+    interval: 10s
+    timeout: 3s
+    retries: 3
+    start_period: 5s</code></pre>
+    <p>
+      This <code>curl</code> runs <strong>inside</strong> the Flask container itself —
+      so <code>localhost:5000</code> correctly refers to Flask running in that same
+      container (which is bound to <code>0.0.0.0</code>, accepting connections
+      including from its own localhost). <code>start_period</code> gives a grace
+      window before failed checks count against <code>retries</code>, so a container
+      isn't marked unhealthy just for still being in the middle of starting up.
+    </p>
+
+    <div class="callout bug">
+      <span class="callout-label">real gotcha: curl doesn't exist in slim images</span>
+      <code>python:3.11-slim</code> doesn't ship with <code>curl</code> by default —
+      minimal images strip out anything not essential. A healthcheck calling
+      <code>curl</code> without installing it first fails immediately, every time,
+      marking the container unhealthy even though Flask itself runs fine.
+      <pre><code>FROM python:3.11.4-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    &amp;&amp; rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+...</code></pre>
+      This install belongs near the very top of the Dockerfile — even above
+      <code>COPY requirements.txt .</code> — since it's tied to the base OS, not the
+      app's dependencies or code. Editing <code>app.py</code> a hundred times over
+      the project's life will never invalidate this layer.
+      <code>rm -rf /var/lib/apt/lists/*</code> cleans up the package index cache
+      afterward, since it's only needed during the install itself.
+    </div>
+
+  </div>
+
+  <div class="chapter-nav">
+    <a href="chapter7.html">
+      <span class="dir">← previous</span>
+      <span>07 · Docker Compose</span>
+    </a>
+    <a href="chapter9.html" class="next">
+      <span class="dir">next →</span>
+      <span>09 · Debugging, Logging &amp; Troubleshooting</span>
+    </a>
+  </div>
+
+</div>
+
+<footer class="site-footer">
+  built while learning docker · served by nginx:alpine
+</footer>
+
+</body>
+</html>
